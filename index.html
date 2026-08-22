@@ -10,10 +10,10 @@
 .app{max-width:760px;margin:auto;padding:18px}.hero{padding:10px 2px 18px}.tag{display:inline-block;padding:6px 10px;border:1px solid #29445e;border-radius:999px;font-size:12px;color:#9ec9ee}
 h1{margin:12px 0 6px;font-size:30px}.sub{margin:0;color:#9eb1c5}.card{background:#0d1b2a;border:1px solid #1c334a;border-radius:20px;padding:16px;margin:12px 0;box-shadow:0 12px 35px #0005}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.btn{border:0;border-radius:14px;padding:14px;font-size:15px;font-weight:700;background:#17314a;color:white;cursor:pointer}.primary{background:#1677ff}.btn:disabled{opacity:.5}
-.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;width:100%;aspect-ratio:4/3;min-height:220px;display:flex;align-items:center;justify-content:center;isolation:isolate}.stage img,.stage video{display:block;width:100%;height:100%;max-width:100%;max-height:100%;object-fit:cover;object-position:center;flex:0 0 100%;position:absolute;inset:0}.stage img{object-fit:contain;background:#02070d}.stage canvas{position:absolute;inset:0;z-index:5;pointer-events:none;display:block;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;margin:0}
+.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;min-height:250px;display:flex;align-items:center;justify-content:center}.stage img,.stage video{display:block;max-width:100%;max-height:62vh;width:100%;height:auto;object-fit:contain}.stage canvas{position:absolute;max-width:100%;max-height:62vh;inset:0;margin:auto}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.stat{background:#0a1522;border-radius:14px;padding:12px}.stat b{display:block;font-size:21px}.stat span{font-size:11px;color:#8fa5ba}
 .status{padding:11px 12px;border-radius:12px;background:#0a1522;color:#a9bed2;font-size:13px}.ok{color:#7ee2a8}.warn{color:#ffd36b}
-small{color:#7890a6;line-height:1.5}.hidden{display:none!important}
+small{color:#7890a6;line-height:1.5}.hidden{display:none}
 input[type=file]{display:none}
 @media(max-width:500px){h1{font-size:26px}.controls{grid-template-columns:1fr}.app{padding:13px}}
 </style>
@@ -30,14 +30,11 @@ input[type=file]{display:none}
     <div class="controls">
       <label class="btn primary">🖼️ Choose Image<input id="file" type="file" accept="image/*"></label>
       <button class="btn" id="cameraBtn">📹 Start Live Camera</button>
-      <button class="btn" id="locationBtn" type="button">📍 Enable / Retry Location</button>
     </div>
     <div style="height:10px"></div>
     <button class="btn hidden" id="stopCameraBtn" style="width:100%">⏹ Stop Live Camera</button>
     <div style="height:10px"></div>
-    <small id="locationHint">Tap Enable / Retry Location and choose Allow. For live camera, also choose Allow for Camera. GPS works only on HTTPS/localhost.</small>
-    <div style="height:10px"></div>
-    <small id="cameraHint">Model: <b>model/best.onnx</b> • Live camera requires HTTPS or localhost. If this file is opened directly from your phone's file manager (file://), the browser will block camera access.</small>
+    <small id="cameraHint">Live camera requires HTTPS or localhost. If this file is opened directly from your phone's file manager (file://), the browser will block camera access.</small>
   </div>
 
   <div class="card">
@@ -58,50 +55,25 @@ input[type=file]{display:none}
   </div>
 
   <div class="card">
-    <b>How it works</b><p><small>📍 When you start the live camera, the browser asks for <b>Location</b> permission and <b>Camera</b> permission. Allow both for GPS coordinates and road scanning.</small></p>
-    <p><small>Images and live camera frames are resized to 640×640 and processed locally by the trained ONNX model in model/best.onnx. WebGPU is used when the phone browser supports it, with WASM fallback. Live detection runs continuously as fast as the phone/model can complete each inference; the Firebase report is written immediately after a confirmed detection, while the ImageBB image upload runs separately.</small></p>
+    <b>How it works</b>
+    <p><small>Images and live camera frames are resized to 640×640 and processed locally by the embedded YOLO model. Live mode repeatedly analyzes camera frames and draws bounding boxes over the road view. No image is uploaded to a server for detection.</small></p>
   </div>
 </div>
 
 <script>
-// ============================================================
-// FAST MOBILE YOLO DETECTOR
-// Model is intentionally kept OUTSIDE index.html.
-// Put the supplied file at: model/best.onnx
-// ============================================================
-const MODEL_PATH = "model/best.onnx";
-const INPUT_SIZE = 640; // The supplied ONNX model was exported for 640x640.
-const CONF_THRESHOLD = 0.35;
-const IOU_THRESHOLD = 0.45;
-const LIVE_INTERVAL_MS = 0; // run again as soon as the previous inference finishes; actual FPS is model/device limited.
+const MODEL_URL = "model/best.onnx";
 
-let session = null;
-let modelInputName = null;
-let inferenceBackend = "loading";
-let stream = null;
+const INPUT_SIZE=640;
+const CONF_THRESHOLD=0.35;
+const IOU_THRESHOLD=0.45;
 
-// GPS state is deliberately declared in this non-module script.
-// A previous version declared these variables inside the Firebase
-// module script, which made them invisible to this script and caused:
-// "locationWatchId is not defined".
-var locationWatchId = null;
-var locationCache = null;
-var locationCacheAt = 0;
-
-let liveMode = false;
-let detecting = false;
-let lastDetection = 0;
-let currentImageSource = null;
-let preprocessCanvas = null;
-let preprocessCtx = null;
-let inputBuffer = null;
-let inputTensor = null;
-let lastBoxes = [];
+let session=null, modelInputName=null;
+let stream=null, liveMode=false, detecting=false, lastDetection=0;
+let currentImageSource=null;
 
 const fileInput=document.getElementById("file");
 const cameraBtn=document.getElementById("cameraBtn");
 const stopCameraBtn=document.getElementById("stopCameraBtn");
-const locationBtn=document.getElementById("locationBtn");
 const cameraVideo=document.getElementById("video");
 const img=document.getElementById("preview");
 const canvas=document.getElementById("overlay");
@@ -109,69 +81,20 @@ const ctx=canvas.getContext("2d");
 const statusEl=document.getElementById("status");
 const placeholder=document.getElementById("placeholder");
 
-function setStatus(t,cls=""){
-  statusEl.textContent=t;
-  statusEl.className="status "+cls;
-}
-
-function initPreprocessor(){
-  if(preprocessCanvas) return;
-  preprocessCanvas=document.createElement("canvas");
-  preprocessCanvas.width=INPUT_SIZE;
-  preprocessCanvas.height=INPUT_SIZE;
-  preprocessCtx=preprocessCanvas.getContext("2d",{willReadFrequently:true});
-  inputBuffer=new Float32Array(3*INPUT_SIZE*INPUT_SIZE);
-  inputTensor=new ort.Tensor("float32",inputBuffer,[1,3,INPUT_SIZE,INPUT_SIZE]);
-}
+function setStatus(t,cls=""){statusEl.textContent=t;statusEl.className="status "+cls}
 
 async function loadModel(){
   try{
-    setStatus("⏳ Loading pothole AI model…");
-    initPreprocessor();
     ort.env.wasm.wasmPaths="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
-    // WASM threading is enabled only when the page is cross-origin isolated.
-    ort.env.wasm.numThreads=(window.crossOriginIsolated && navigator.hardwareConcurrency)
-      ? Math.min(2,navigator.hardwareConcurrency) : 1;
-
-    const response=await fetch(MODEL_PATH,{cache:"force-cache"});
-    if(!response.ok) throw new Error("Could not load "+MODEL_PATH+" (HTTP "+response.status+")");
-    const modelBuffer=await response.arrayBuffer();
-    const common={graphOptimizationLevel:"all"};
-
-    // Prefer the phone's built-in GPU through WebGPU. No dedicated GPU is required.
-    if(navigator.gpu){
-      try{
-        session=await ort.InferenceSession.create(modelBuffer,{...common,executionProviders:["webgpu"]});
-        inferenceBackend="WebGPU";
-      }catch(webgpuError){
-        console.warn("WebGPU unavailable for this model; falling back to WASM.",webgpuError);
-        session=null;
-      }
-    }
-
-    if(!session && ort.env.webgl){
-      try{
-        session=await ort.InferenceSession.create(modelBuffer,{...common,executionProviders:["webgl"]});
-        inferenceBackend="WebGL";
-      }catch(webglError){
-        console.warn("WebGL unavailable; falling back to WASM.",webglError);
-        session=null;
-      }
-    }
-
-    if(!session){
-      session=await ort.InferenceSession.create(modelBuffer,{...common,executionProviders:["wasm"]});
-      inferenceBackend="WASM";
-    }
-
+    const response=await fetch(MODEL_URL);
+    if(!response.ok) throw new Error(`Model request failed: ${response.status} ${response.statusText}`);
+    const bytes=new Uint8Array(await response.arrayBuffer());
+    session=await ort.InferenceSession.create(bytes,{executionProviders:["wasm"]});
     modelInputName=session.inputNames[0];
-    setStatus("🤖 AI ready • "+inferenceBackend+" • requesting location permission…","ok");
-        // Do not force a permission prompt on page load. The user can tap the
-        // Location button (or Start Live Camera) to trigger the browser prompt.
-        console.log("AI ready; GPS permission can now be requested by the user.");
+    setStatus("AI model ready • start camera or choose an image","ok");
   }catch(e){
     console.error(e);
-    setStatus("❌ Model failed to load. Keep model/best.onnx beside index.html and use HTTPS.","warn");
+    setStatus("Model failed to load. Check internet access and refresh the page.","warn");
   }
 }
 
@@ -182,24 +105,28 @@ function letterbox(source){
   const nw=Math.round(w*scale), nh=Math.round(h*scale);
   const padX=(INPUT_SIZE-nw)/2, padY=(INPUT_SIZE-nh)/2;
 
-  preprocessCtx.fillStyle="#808080";
-  preprocessCtx.fillRect(0,0,INPUT_SIZE,INPUT_SIZE);
-  preprocessCtx.drawImage(source,0,0,w,h,padX,padY,nw,nh);
+  const c=document.createElement("canvas");
+  c.width=INPUT_SIZE;c.height=INPUT_SIZE;
+  const x=c.getContext("2d");
+  x.fillStyle="#808080";
+  x.fillRect(0,0,INPUT_SIZE,INPUT_SIZE);
+  x.drawImage(source,0,0,w,h,padX,padY,nw,nh);
 
-  const d=preprocessCtx.getImageData(0,0,INPUT_SIZE,INPUT_SIZE).data;
+  const d=x.getImageData(0,0,INPUT_SIZE,INPUT_SIZE).data;
+  const chw=new Float32Array(3*INPUT_SIZE*INPUT_SIZE);
   const plane=INPUT_SIZE*INPUT_SIZE;
-  let r=0,g=plane,b=plane*2;
-  for(let p=0;p<d.length;p+=4){
-    inputBuffer[r++]=d[p]/255;
-    inputBuffer[g++]=d[p+1]/255;
-    inputBuffer[b++]=d[p+2]/255;
+  for(let y=0;y<INPUT_SIZE;y++) for(let xx=0;xx<INPUT_SIZE;xx++){
+    const p=(y*INPUT_SIZE+xx)*4, j=y*INPUT_SIZE+xx;
+    chw[j]=d[p]/255;
+    chw[plane+j]=d[p+1]/255;
+    chw[2*plane+j]=d[p+2]/255;
   }
-  return {tensor:inputTensor,scale,padX,padY};
+  return {tensor:new ort.Tensor("float32",chw,[1,3,INPUT_SIZE,INPUT_SIZE]),scale,padX,padY};
 }
 
 function iou(a,b){
-  const x1=Math.max(a.x1,b.x1),y1=Math.max(a.y1,b.y1);
-  const x2=Math.min(a.x2,b.x2),y2=Math.min(a.y2,b.y2);
+  const x1=Math.max(a.x1,b.x1), y1=Math.max(a.y1,b.y1);
+  const x2=Math.min(a.x2,b.x2), y2=Math.min(a.y2,b.y2);
   const inter=Math.max(0,x2-x1)*Math.max(0,y2-y1);
   const areaA=Math.max(0,a.x2-a.x1)*Math.max(0,a.y2-a.y1);
   const areaB=Math.max(0,b.x2-b.x1)*Math.max(0,b.y2-b.y1);
@@ -210,8 +137,7 @@ function nms(boxes){
   boxes.sort((a,b)=>b.score-a.score);
   const keep=[];
   while(boxes.length){
-    const a=boxes.shift();
-    keep.push(a);
+    const a=boxes.shift(); keep.push(a);
     boxes=boxes.filter(b=>iou(a,b)<IOU_THRESHOLD);
   }
   return keep;
@@ -237,86 +163,52 @@ function parseOutput(out,scale,padX,padY,origW,origH){
   return nms(boxes);
 }
 
-function syncOverlayToSource(source,w,h){
-  const stage=document.getElementById("stage");
-  const sr=stage.getBoundingClientRect();
-  canvas.style.left="0px";
-  canvas.style.top="0px";
-  canvas.style.width=sr.width+"px";
-  canvas.style.height=sr.height+"px";
-  canvas.width=Math.max(1,Math.round(sr.width));
-  canvas.height=Math.max(1,Math.round(sr.height));
-}
-
-function sourceToStageBox(b,w,h,source){
-  const stage=document.getElementById("stage");
-  const sw=stage.clientWidth, sh=stage.clientHeight;
-  if(!source || source.tagName!=="VIDEO"){
-    const sx=sw/w, sy=sh/h;
-    const s=Math.min(sx,sy), dw=w*s, dh=h*s;
-    const ox=(sw-dw)/2, oy=(sh-dh)/2;
-    return {x1:b.x1*s+ox,y1:b.y1*s+oy,x2:b.x2*s+ox,y2:b.y2*s+oy};
-  }
-  // video uses object-fit: cover, so reproduce the crop used by the browser.
-  const scale=Math.max(sw/w,sh/h), dw=w*scale, dh=h*scale;
-  const ox=(sw-dw)/2, oy=(sh-dh)/2;
-  return {x1:b.x1*scale+ox,y1:b.y1*scale+oy,x2:b.x2*scale+ox,y2:b.y2*scale+oy};
-}
-
-function drawBoxes(boxes,w,h,source=null){
-  const media=source || (liveMode ? cameraVideo : img);
-  syncOverlayToSource(media,w,h);
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  ctx.lineWidth=Math.max(3,canvas.width/300);
-  ctx.font=Math.max(16,canvas.width/45)+"px system-ui";
+function drawBoxes(boxes,w,h){
+  canvas.width=w; canvas.height=h;
+  canvas.style.width=(cameraVideo.classList.contains("hidden") ? img.clientWidth : cameraVideo.clientWidth)+"px";
+  canvas.style.height=(cameraVideo.classList.contains("hidden") ? img.clientHeight : cameraVideo.clientHeight)+"px";
+  ctx.clearRect(0,0,w,h);
+  ctx.lineWidth=Math.max(3,w/300);
+  ctx.font=Math.max(16,w/45)+"px system-ui";
   boxes.forEach(b=>{
-    const q=sourceToStageBox(b,w,h,media);
     ctx.strokeStyle="#00e676";ctx.fillStyle="#00e676";
-    ctx.strokeRect(q.x1,q.y1,q.x2-q.x1,q.y2-q.y1);
+    ctx.strokeRect(b.x1,b.y1,b.x2-b.x1,b.y2-b.y1);
     const label=`Pothole ${(b.score*100).toFixed(0)}%`;
     const tw=ctx.measureText(label).width+14,th=28;
-    ctx.fillRect(q.x1,Math.max(0,q.y1-th),tw,th);
+    ctx.fillRect(b.x1,Math.max(0,b.y1-th),tw,th);
     ctx.fillStyle="#06120b";
-    ctx.fillText(label,q.x1+7,Math.max(19,q.y1-8));
+    ctx.fillText(label,b.x1+7,Math.max(19,b.y1-8));
   });
 }
 
-
 async function detectSource(source){
-  if(!session||!source) return [];
+  if(!session || !source) return;
   const w=source.videoWidth||source.naturalWidth||source.width;
   const h=source.videoHeight||source.naturalHeight||source.height;
-  if(!w||!h) return [];
+  if(!w||!h) return;
 
   const t0=performance.now();
   const lb=letterbox(source);
   const result=await session.run({[modelInputName]:lb.tensor});
   const output=result[session.outputNames[0]];
   const boxes=parseOutput(output,lb.scale,lb.padX,lb.padY,w,h);
-  lastBoxes=boxes;
+  // Integration hook: expose the real model detections to the Firebase/report layer.
+  window.__lastPotholeDetections = boxes.map(b=>({...b}));
+  window.__lastPotholeSource = source;
 
-  // Reporting layer reads these values without blocking the detector.
-  window.__lastPotholeDetections=boxes.map(b=>({...b}));
-  window.__lastPotholeSource=source;
-
-  drawBoxes(boxes,w,h,source);
+  drawBoxes(boxes,w,h);
   document.getElementById("count").textContent=boxes.length;
   document.getElementById("best").textContent=boxes.length?Math.round(Math.max(...boxes.map(x=>x.score))*100)+"%":"0%";
   document.getElementById("time").textContent=Math.round(performance.now()-t0)+" ms";
-  setStatus(boxes.length?`⚠️ ${boxes.length} pothole${boxes.length>1?"s":""} detected`:`✅ Scanning • ${inferenceBackend}`,boxes.length?"warn":"ok");
-  // Reporting is deliberately fire-and-forget so Firebase/GPS/ImageBB never slow detection.
-  if(typeof window.onPotholeDetection === "function"){
-    window.onPotholeDetection(source, boxes).catch(err=>console.warn("Report hook error:",err));
-  } else if(boxes.length){
-    window.__pendingPotholeDetection={source,boxes};
-  }
-  return boxes;
+  setStatus(boxes.length?`⚠️ ${boxes.length} pothole${boxes.length>1?"s":""} detected`:"✅ No pothole detected",boxes.length?"warn":"ok");
 }
 
 async function liveDetectionLoop(now){
   if(!liveMode) return;
   requestAnimationFrame(liveDetectionLoop);
-  if(detecting || now-lastDetection<LIVE_INTERVAL_MS || cameraVideo.readyState<2 || !session) return;
+
+  // Run inference roughly 8 times/second instead of on every camera frame.
+  if(detecting || now-lastDetection<120 || cameraVideo.readyState<2 || !session) return;
   lastDetection=now;
   detecting=true;
   try{
@@ -329,99 +221,59 @@ async function liveDetectionLoop(now){
   }
 }
 
-// GPS lives in this same classic script as the camera code.
-// The GPS function has a unique name and is exposed through window.
-async function potholeGetCurrentPosition(){
-  if(locationCache && Date.now()-locationCacheAt<120000) return locationCache;
-  if(!window.isSecureContext) return {available:false,reason:"insecure"};
-  if(!navigator.geolocation) return {available:false,reason:"unsupported"};
-  return await new Promise(resolve=>{
-    navigator.geolocation.getCurrentPosition(pos=>{
-      locationCache={available:true,latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,timestamp:Date.now()};
-      locationCacheAt=Date.now(); resolve(locationCache);
-    },err=>{
-      const reason=err?.code===1?"denied":err?.code===2?"unavailable":"timeout";
-      resolve(locationCache && Date.now()-locationCacheAt<120000 ? locationCache : {available:false,reason});
-    },{enableHighAccuracy:true,maximumAge:1000,timeout:4000});
-  });
-}
-window.getPotholeLocation=potholeGetCurrentPosition;
-
-function startLocationWatch(){
-  if(!navigator.geolocation || locationWatchId!==null || !window.isSecureContext) return;
-  locationWatchId=navigator.geolocation.watchPosition(pos=>{
-    locationCache={
-      available:true,
-      latitude:pos.coords.latitude,
-      longitude:pos.coords.longitude,
-      accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,
-      timestamp:Date.now()
-    };
-    locationCacheAt=Date.now();
-    locationBtn.textContent="📍 Location Ready";
-    locationBtn.disabled=false;
-  },err=>{
-    console.warn("GPS watch error",err);
-  },{enableHighAccuracy:true,maximumAge:5000,timeout:15000});
-}
-
-async function requestLocationPermission(){
-  if(!window.isSecureContext){
-    setStatus("🔒 Location needs HTTPS. Open the website using https:// (not file://).","warn");
-    return {available:false,reason:"insecure"};
-  }
-  if(!navigator.geolocation){
-    setStatus("⚠️ This browser does not support GPS location.","warn");
-    return {available:false,reason:"unsupported"};
-  }
-  setStatus("📍 Allow Location when your browser asks…");
-  // IMPORTANT: call the GPS function only through window.
-  const loc=window.getPotholeLocation
-    ? await window.getPotholeLocation()
-    : {available:false,reason:"gps_function_unavailable"};
-  if(loc.available){
-    startLocationWatch();
-    setStatus(`📍 GPS ready • ${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}`,"ok");
-    locationBtn.textContent="📍 Location Ready";
-  }else if(loc.reason==="denied"){
-    setStatus("🚫 Location denied. Tap the browser 🔒/site settings → Location → Allow, then tap Retry Location.","warn");
-  }else{
-    setStatus("⚠️ Could not get GPS. Turn on phone Location/GPS and tap Retry Location.","warn");
-  }
-  return loc;
-}
-window.requestPotholeLocation=requestLocationPermission;
-
 async function startCamera(){
+  // Browser camera access requires a secure context.
+  // HTTPS and localhost are allowed; opening this HTML directly as file://
+  // is normally blocked by the browser for security reasons.
   if(!window.isSecureContext){
     setStatus("🔒 Camera blocked: open this page on HTTPS or localhost. file:// pages cannot use the live camera.","warn");
     return;
   }
-  if(!navigator.mediaDevices||typeof navigator.mediaDevices.getUserMedia!=="function"){
+
+  if(!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia!=="function"){
     setStatus("📵 This browser does not provide camera access. Try the latest Chrome/Edge.","warn");
     return;
   }
+
   if(!session){
     setStatus("⏳ AI model is still loading. Please wait a moment, then start the camera.","warn");
     return;
   }
+
   try{
     stopCamera();
-    // Ask for GPS without blocking camera startup. Camera must open immediately after the tap.
-    requestLocationPermission().catch(err=>console.warn("GPS permission request failed:",err));
-    setStatus("📷 Allow Camera when your browser asks…");
-    const constraints={audio:false,video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30,max:30}}};
-    try{stream=await navigator.mediaDevices.getUserMedia(constraints);}
-    catch(firstError){
+    setStatus("📷 Requesting camera permission…");
+
+    // Prefer the rear camera on phones. The fallback constraints below
+    // keep the request compatible with more Android devices/browsers.
+    const constraints={
+      audio:false,
+      video:{
+        facingMode:{ideal:"environment"},
+        width:{ideal:1280},
+        height:{ideal:720}
+      }
+    };
+
+    try{
+      stream=await navigator.mediaDevices.getUserMedia(constraints);
+    }catch(firstError){
       console.warn("Preferred camera constraints failed:",firstError);
-      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});
+
+      // Some mobile browsers reject ideal resolution/facingMode
+      // combinations. Retry with the simplest camera request.
+      stream=await navigator.mediaDevices.getUserMedia({video:true,audio:false});
     }
 
     cameraVideo.srcObject=stream;
     cameraVideo.muted=true;
     cameraVideo.playsInline=true;
+
     await new Promise((resolve,reject)=>{
-      if(cameraVideo.readyState>=2){resolve();return;}
+      if(cameraVideo.readyState>=2){
+        resolve();
+        return;
+      }
       const onLoaded=()=>{cleanup();resolve();};
       const onError=()=>{cleanup();reject(new Error("Camera video could not be initialized."));};
       const cleanup=()=>{
@@ -431,9 +283,8 @@ async function startCamera(){
       cameraVideo.addEventListener("loadedmetadata",onLoaded,{once:true});
       cameraVideo.addEventListener("error",onError,{once:true});
     });
-    await cameraVideo.play();
 
-    startLocationWatch();
+    await cameraVideo.play();
 
     liveMode=true;
     placeholder.classList.add("hidden");
@@ -443,20 +294,36 @@ async function startCamera(){
     cameraBtn.textContent="📹 Live Camera Running";
     cameraBtn.disabled=true;
     stopCameraBtn.classList.remove("hidden");
-    setStatus("🔴 LIVE • scanning road • "+inferenceBackend,"ok");
+    setStatus("🔴 LIVE • scanning road for potholes…","ok");
+
+    // Start only one animation loop.
     lastDetection=0;
     requestAnimationFrame(liveDetectionLoop);
+
   }catch(e){
     console.error("Camera start error:",e);
-    if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
+
+    if(stream){
+      stream.getTracks().forEach(t=>t.stop());
+      stream=null;
+    }
     cameraVideo.srcObject=null;
+
     let message="Camera could not start.";
-    if(e?.name==="NotAllowedError")message="🚫 Camera permission was denied. Allow camera permission for this site and try again.";
-    else if(e?.name==="NotFoundError")message="📷 No camera was found on this device.";
-    else if(e?.name==="NotReadableError")message="📷 Camera is busy or unavailable. Close other apps using the camera and try again.";
-    else if(e?.name==="OverconstrainedError")message="⚙️ Camera settings were not supported. Please try again.";
-    else if(e?.name==="SecurityError")message="🔒 Camera blocked by browser security. Use HTTPS or localhost.";
-    else if(e?.message)message+=" "+e.message;
+    if(e && e.name==="NotAllowedError"){
+      message="🚫 Camera permission was denied. Allow camera permission for this site and try again.";
+    }else if(e && e.name==="NotFoundError"){
+      message="📷 No camera was found on this device.";
+    }else if(e && e.name==="NotReadableError"){
+      message="📷 Camera is busy or unavailable. Close other apps using the camera and try again.";
+    }else if(e && e.name==="OverconstrainedError"){
+      message="⚙️ Camera settings were not supported. Please try again.";
+    }else if(e && e.name==="SecurityError"){
+      message="🔒 Camera blocked by browser security. Use HTTPS or localhost.";
+    }else if(e && e.message){
+      message+=" "+e.message;
+    }
+
     setStatus(message,"warn");
   }
 }
@@ -464,15 +331,23 @@ async function startCamera(){
 function stopCamera(){
   liveMode=false;
   detecting=false;
-  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
-  if(locationWatchId!==null && navigator.geolocation){ navigator.geolocation.clearWatch(locationWatchId); locationWatchId=null; }
+  if(stream){
+    stream.getTracks().forEach(t=>t.stop());
+    stream=null;
+  }
+  cameraVideo.pause();
   cameraVideo.srcObject=null;
   cameraVideo.classList.add("hidden");
+  stopCameraBtn.classList.add("hidden");
   cameraBtn.disabled=false;
   cameraBtn.textContent="📹 Start Live Camera";
-  stopCameraBtn.classList.add("hidden");
+
   ctx.clearRect(0,0,canvas.width,canvas.height);
-  if(!img.src){canvas.classList.add("hidden");placeholder.classList.remove("hidden");}
+
+  if(!img.src) {
+    canvas.classList.add("hidden");
+    placeholder.classList.remove("hidden");
+  }
 }
 
 function loadImage(file){
@@ -491,11 +366,11 @@ function loadImage(file){
 
 fileInput.addEventListener("change",e=>loadImage(e.target.files[0]));
 cameraBtn.addEventListener("click",startCamera);
-locationBtn.addEventListener("click",requestLocationPermission);
 stopCameraBtn.addEventListener("click",stopCamera);
-window.addEventListener("resize",()=>{ if(lastBoxes.length){ const media=liveMode?cameraVideo:img; const w=media.videoWidth||media.naturalWidth||media.width; const h=media.videoHeight||media.naturalHeight||media.height; if(w&&h) drawBoxes(lastBoxes,w,h,media); }});
+
 window.addEventListener("beforeunload",stopCamera);
 loadModel();
+
 </script>
 
 <!-- Firebase + reporting integration. Existing AI/model code above remains unchanged. -->
@@ -528,14 +403,14 @@ const REPORT_CONFIG = {
   duplicateDistanceMeters: 35,
   sameSessionCooldownMs: 15000,
   cameraStableDetectionsRequired: 2,
-  cameraUploadCooldownMs: 5000,
+  cameraUploadCooldownMs: 60000,
   maxSupportingObservations: 12
 };
 
 let app=null, db=null, auth=null, firebaseReady=false;
 let lastReportAt=0, lastReportSignature="", stableDetectionCount=0;
 let lastObservationAt=0;
-let reportInFlight=false;
+let locationCache=null, locationCacheAt=0;
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function isFirebaseConfigured(){
@@ -560,7 +435,16 @@ function haversineMeters(aLat,aLng,bLat,bLng){
   return 2*R*Math.asin(Math.min(1,Math.sqrt(x)));
 }
 function validLatLng(lat,lng){ return Number.isFinite(lat)&&Number.isFinite(lng)&&lat>=-90&&lat<=90&&lng>=-180&&lng<=180; }
-const getCurrentPotholeLocation=()=>window.getPotholeLocation ? window.getPotholeLocation() : Promise.resolve({available:false,reason:"gps_unavailable"});
+async function getLocation(){
+  if(locationCache && Date.now()-locationCacheAt<30000) return locationCache;
+  if(!navigator.geolocation) return {available:false};
+  return await new Promise(resolve=>{
+    navigator.geolocation.getCurrentPosition(pos=>{
+      locationCache={available:true,latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,timestamp:Date.now()};
+      locationCacheAt=Date.now(); resolve(locationCache);
+    },()=>resolve({available:false}),{enableHighAccuracy:true,maximumAge:10000,timeout:8000});
+  });
+}
 async function imageToBlob(source){
   if(source && source.tagName==='IMG'){
     const r=await fetch(source.src); return await r.blob();
@@ -624,49 +508,42 @@ async function findNearbyPothole(location){
   return best;
 }
 async function createOrUpdateReport(boxes,source,imageBlob){
-  if(!firebaseReady || !db || !boxes?.length) return null;
-
+  if(!firebaseReady || !db || !boxes?.length) return;
+  const location=await getLocation();
   const now=Date.now();
   const sourceType=source?.tagName==='VIDEO'?'live_camera':'image_upload';
-  const stats=confidenceStats(boxes);
-  const best=stats.best;
-  if(!Number.isFinite(best) || best<REPORT_CONFIG.confidenceThreshold)return null;
+  const best=confidenceStats(boxes).best;
+  if(!Number.isFinite(best) || best<REPORT_CONFIG.confidenceThreshold)return;
 
-  // Location is requested/cached separately so it never blocks the detector loop.
-  const location=await getCurrentPotholeLocation();
-  const sig=(location.available
-    ? `${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}`
-    : 'no-location')+':'+boxes.length;
+  const sig=(location.available?`${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}`:'no-location')+':'+boxes.length;
+  if(sourceType==='live_camera'){
+    if(sig===lastReportSignature && now-lastReportAt<REPORT_CONFIG.cameraUploadCooldownMs){
+      stableDetectionCount++;
+      return;
+    }
+    stableDetectionCount++;
+    if(stableDetectionCount<REPORT_CONFIG.cameraStableDetectionsRequired)return;
+  }
+  if(now-lastObservationAt<REPORT_CONFIG.sameSessionCooldownMs && sig===lastReportSignature)return;
 
-  if(now-lastObservationAt<REPORT_CONFIG.sameSessionCooldownMs && sig===lastReportSignature)return null;
-
-  // Look for an existing pothole near the current GPS point.
   let nearby=null;
-  try{ nearby=await findNearbyPothole(location); }
-  catch(e){ console.warn('Nearby pothole lookup failed; creating a fresh report.',e); }
-
-  const sourceImagePromise = imageBlob
-    ? Promise.resolve(imageBlob)
-    : (sourceType==='live_camera' ? imageToBlob(source) : Promise.resolve(null));
+  try{nearby=await findNearbyPothole(location);}catch(e){console.error('Nearby pothole lookup failed',e);}
+  let imageResult={url:null,status:'not_uploaded'};
+  if(!nearby || !nearby.data?.imageUrl){
+    const uploadBlob=imageBlob || (sourceType==='live_camera'?await imageToBlob(source):null);
+    if(uploadBlob){
+      try{setReportStatus('☁️ Uploading pothole image…'); imageResult=await uploadToImageBB(uploadBlob);}
+      catch(e){console.error(e);setReportStatus('⚠️ Detection found, but image upload failed. Report metadata can still be saved.','warn');}
+    }
+  }
 
   if(nearby){
     const p=nearby.data;
+    const observation=makeObservation({reportId:p.reportId||nearby.id,potholeId:nearby.id,boxes,location,sourceType,imageUrl:imageResult.url});
     const occurrence=(Number(p.occurrenceCount)||1)+1;
-    const vehicleCount=Math.max(Number(p.vehicleCount)||1, sourceType==='live_camera' ? (Number(p.vehicleCount)||1)+1 : (Number(p.vehicleCount)||1));
-    const pr=priorityFrom({
-      bestConfidence:Math.max(Number(p.bestConfidence)||0,best),
-      occurrenceCount:occurrence,
-      vehicleCount,
-      severity:p.severity,
-      ageMs:now-(Number(p.firstDetectedAt)||now)
-    });
-
-    const observation=makeObservation({
-      reportId:p.reportId||nearby.id,
-      potholeId:nearby.id,
-      boxes,location,sourceType,imageUrl:null
-    });
-
+    const vehicleCount=Math.max(Number(p.vehicleCount)||1, sourceType==='live_camera'?(p.vehicleCount||1)+1:(p.vehicleCount||1));
+    const pr=priorityFrom({bestConfidence:Math.max(Number(p.bestConfidence)||0,best),occurrenceCount:occurrence,vehicleCount,severity:p.severity,ageMs:now-(Number(p.firstDetectedAt)||now)});
+    const historyRef=push(ref(db,`statusHistory/${p.reportId||nearby.id}`));
     const updates={
       [`potholes/${nearby.id}/occurrenceCount`]:occurrence,
       [`potholes/${nearby.id}/detectionCount`]: (Number(p.detectionCount)||0)+boxes.length,
@@ -678,140 +555,65 @@ async function createOrUpdateReport(boxes,source,imageBlob){
       [`potholes/${nearby.id}/updatedAt`]:now,
       [`observations/${observation.observationId}`]:observation
     };
-
-    // Firebase root rules intentionally deny root writes. Write each allowed child path directly.
-    await Promise.all([
-      update(ref(db,`potholes/${nearby.id}`),{
-        occurrenceCount:occurrence,
-        detectionCount:(Number(p.detectionCount)||0)+boxes.length,
-        bestConfidence:Math.max(Number(p.bestConfidence)||0,best),
-        lastDetectedAt:now,
-        vehicleCount:vehicleCount,
-        priority:pr.level,
-        priorityScore:pr.score,
-        updatedAt:now
-      }),
-      set(ref(db,`observations/${observation.observationId}`),observation)
-    ]);
-    lastReportAt=now; lastReportSignature=sig; lastObservationAt=now;
-    setReportStatus(`⚠️ Pothole updated in Firebase • occurrence ${occurrence}`,'warn');
-
-    // Upload image independently and patch the existing record when ready.
-    sourceImagePromise.then(async blob=>{
-      if(!blob || p.imageUrl) return;
-      try{
-        const result=await uploadToImageBB(blob);
-        if(result.url){
-          await Promise.all([
-            update(ref(db,`reports/${p.reportId||nearby.id}`),{imageUrl:result.url,imageUploadStatus:result.status,updatedAt:Date.now()}),
-            update(ref(db,`potholes/${nearby.id}`),{imageUrl:result.url,imageUploadStatus:result.status,updatedAt:Date.now()})
-          ]);
-        }
-      }catch(e){ console.warn('ImageBB upload failed:',e); }
-    }).catch(e=>console.warn('Frame capture failed:',e));
-
-    return p.reportId||nearby.id;
+    if(imageResult.url && !p.imageUrl) updates[`potholes/${nearby.id}/imageUrl`]=imageResult.url;
+    if(!p.reportId)updates[`potholes/${nearby.id}/reportId`]=nearby.id;
+    await update(ref(db),updates);
+    lastReportAt=now;lastReportSignature=sig;lastObservationAt=now;stableDetectionCount=0;
+    setReportStatus(`⚠️ Pothole updated • occurrence ${occurrence}`,'warn');
+    return nearby.id;
   }
 
   const reportId='RPT-'+new Date(now).toISOString().replace(/[-:TZ.]/g,'').slice(0,14)+'-'+Math.random().toString(36).slice(2,7).toUpperCase();
   const potholeId='PTH-'+uuid();
-  const observation=makeObservation({reportId,potholeId,boxes,location,sourceType,imageUrl:null});
+  const observation=makeObservation({reportId,potholeId,boxes,location,sourceType,imageUrl:imageResult.url});
+  const stats=confidenceStats(boxes);
   const pr=priorityFrom({bestConfidence:stats.best,occurrenceCount:1,vehicleCount:1,ageMs:0});
-
   const report={
-    reportId,potholeId,imageUrl:null,imageUploadStatus:'pending',
+    reportId,potholeId,imageUrl:imageResult.url||null,imageUploadStatus:imageResult.status,
     detectionConfidence:stats.best,detectionClass:'pothole',detectionCount:stats.count,
     detections:observation.detections,
-    latitude:location.available?location.latitude:null,
-    longitude:location.available?location.longitude:null,
-    locationAccuracy:location.available?location.accuracy:null,
+    latitude:location.available?location.latitude:null,longitude:location.available?location.longitude:null,locationAccuracy:location.available?location.accuracy:null,
     address:null,area:null,
-    timestamp:now,
-    date:new Date(now).toISOString().slice(0,10),
-    time:new Date(now).toTimeString().slice(0,8),
+    timestamp:now,date:new Date(now).toISOString().slice(0,10),time:new Date(now).toTimeString().slice(0,8),
     day:new Date(now).getDate(),month:new Date(now).getMonth()+1,year:new Date(now).getFullYear(),
     deviceSessionId:sessionStorage.getItem('potholeSessionId')||(sessionStorage.setItem('potholeSessionId',uuid()),sessionStorage.getItem('potholeSessionId')),
-    source:sourceType,status:'New',priority:pr.level,priorityScore:pr.score,severity:null,
-    occurrenceCount:1,detectionCountTotal:stats.count,vehicleCount:1,
-    firstDetectedAt:now,lastDetectedAt:now,duplicateCount:0,nearbyReports:0,
-    verificationState:'Unverified',repairStatus:'Unresolved',
-    modelName:'YOLO browser ONNX',modelVersion:'model/best.onnx',
-    createdAt:now,updatedAt:now,notes:'',
+    source:sourceType,status:'New',priority:pr.level,priorityScore:pr.score,severity:null,occurrenceCount:1,
+    detectionCountTotal:stats.count,vehicleCount:1,firstDetectedAt:now,lastDetectedAt:now,duplicateCount:0,nearbyReports:0,verificationState:'Unverified',repairStatus:'Unresolved',
+    modelName:'YOLO11n browser ONNX',modelVersion:'embedded',createdAt:now,updatedAt:now,notes:'',
     bestConfidence:stats.best,averageConfidence:stats.average
   };
-
+  const updates={};
+  updates[`reports/${reportId}`]=report;
+  updates[`potholes/${potholeId}`]={...report};
+  updates[`observations/${observation.observationId}`]=observation;
   const h=push(ref(db,`statusHistory/${reportId}`));
-  // Firebase root rules deny root writes, so use explicit child writes.
-  // These writes happen before ImageBB so the report appears in Admin immediately.
-  await Promise.all([
-    set(ref(db,`reports/${reportId}`),report),
-    set(ref(db,`potholes/${potholeId}`),{...report}),
-    set(ref(db,`observations/${observation.observationId}`),observation),
-    set(ref(db,`statusHistory/${reportId}/${h.key}`),{
-      status:'New',timestamp:now,adminUid:null,actor:'system',
-      note:'Report created immediately after AI pothole detection'
-    })
-  ]);
-
-  lastReportAt=now; lastReportSignature=sig; lastObservationAt=now;
-  setReportStatus('✅ Pothole detected • report sent to Firebase','ok');
-
-  // ImageBB never blocks Firebase reporting or live detection.
-  sourceImagePromise.then(async blob=>{
-    if(!blob)return;
-    try{
-      const result=await uploadToImageBB(blob);
-      await Promise.all([
-        update(ref(db,`reports/${reportId}`),{imageUrl:result.url||null,imageUploadStatus:result.status,updatedAt:Date.now()}),
-        update(ref(db,`potholes/${potholeId}`),{imageUrl:result.url||null,imageUploadStatus:result.status,updatedAt:Date.now()})
-      ]);
-    }catch(e){
-      console.warn('ImageBB upload failed:',e);
-      await Promise.all([
-        update(ref(db,`reports/${reportId}`),{imageUploadStatus:'failed'}),
-        update(ref(db,`potholes/${potholeId}`),{imageUploadStatus:'failed'})
-      ]).catch(()=>{});
-    }
-  }).catch(e=>console.warn('Image capture failed:',e));
-
+  updates[`statusHistory/${reportId}/${h.key}`]={status:'New',timestamp:now,adminUid:null,actor:'system',note:'Report created'};
+  await update(ref(db),updates);
+  lastReportAt=now;lastReportSignature=sig;lastObservationAt=now;stableDetectionCount=0;
+  setReportStatus('✅ Pothole report saved to Firebase','ok');
   return reportId;
 }
 
-window.onPotholeDetection = async function(source, boxes){
-  if(!boxes.length || !firebaseReady) return boxes;
-  const sourceType=source?.tagName==='VIDEO'?'live_camera':'image_upload';
-  if(sourceType==='live_camera'){
-    const best=confidenceStats(boxes).best;
-    if(!Number.isFinite(best)||best<REPORT_CONFIG.confidenceThreshold){ stableDetectionCount=0; return boxes; }
-    stableDetectionCount++;
-    const now=Date.now();
-    if(stableDetectionCount<REPORT_CONFIG.cameraStableDetectionsRequired) return boxes;
-    if(now-lastReportAt<REPORT_CONFIG.cameraUploadCooldownMs) return boxes;
-    if(reportInFlight) return boxes;
-    stableDetectionCount=0;
-    reportInFlight=true;
-    createOrUpdateReport(boxes,source,null)
-      .catch(e=>{
-        console.error('Async camera report error:',e);
-        setReportStatus('❌ Firebase report failed • '+(e?.message||e),'warn');
-      })
-      .finally(()=>{reportInFlight=false;});
-    return boxes;
-  }
+async function integrationDetectSource(source){
+  if(window.__originalDetectSource) await window.__originalDetectSource(source);
+  const boxes=Array.isArray(window.__lastPotholeDetections)?window.__lastPotholeDetections:[];
+  if(!boxes.length || !firebaseReady)return boxes;
   try{
-    const blob=await imageToBlob(source);
+    let blob=null;
+    const sourceType=source?.tagName==='VIDEO'?'live_camera':'image_upload';
+    if(sourceType==='image_upload'){
+      blob=await imageToBlob(source);
+    }else{
+      // Do not capture every camera frame. A frame is captured only inside createOrUpdateReport after
+      // stability/duplicate/cooldown checks have passed.
+      blob=null;
+    }
     await createOrUpdateReport(boxes,source,blob);
   }catch(e){
-    console.error('Image report integration error:',e);
-    setReportStatus('❌ Firebase report failed • '+(e?.message||e),'warn');
+    console.error('Report integration error:',e);
+    setReportStatus('⚠️ Detection worked, but the report could not be synchronized.','warn');
   }
   return boxes;
-};
-
-if(window.__pendingPotholeDetection){
-  const pending=window.__pendingPotholeDetection;
-  window.__pendingPotholeDetection=null;
-  window.onPotholeDetection(pending.source,pending.boxes).catch(e=>console.warn('Queued report error:',e));
 }
 
 async function initReporting(){
@@ -830,7 +632,10 @@ async function initReporting(){
   }
 }
 
-window.potholeReporting={createOrUpdateReport,getCurrentPotholeLocation:getCurrentPotholeLocation,uploadToImageBB,REPORT_CONFIG};
+// Keep the existing detector as the source of truth; only add the reporting hook.
+window.__originalDetectSource=window.detectSource;
+window.detectSource=integrationDetectSource;
+window.potholeReporting={createOrUpdateReport,getLocation,uploadToImageBB,REPORT_CONFIG};
 initReporting();
 </script>
 
