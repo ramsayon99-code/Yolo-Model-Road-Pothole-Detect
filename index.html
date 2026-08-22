@@ -304,10 +304,9 @@ async function liveDetectionLoop(now){
   }
 }
 
-// GPS lives in this same (classic) script as the camera code.
-// This prevents module-scope errors such as:
-// "locationWatchId is not defined" / "getLocation is not defined".
-async function getLocation(){
+// GPS lives in this same classic script as the camera code.
+// The GPS function has a unique name and is exposed through window.
+async function potholeGetCurrentPosition(){
   if(!window.isSecureContext){
     return {available:false,reason:"insecure"};
   }
@@ -331,7 +330,7 @@ async function getLocation(){
     },{enableHighAccuracy:true,maximumAge:5000,timeout:15000});
   });
 }
-window.getPotholeLocation=getLocation;
+window.getPotholeLocation=potholeGetCurrentPosition;
 
 function startLocationWatch(){
   if(!navigator.geolocation || locationWatchId!==null || !window.isSecureContext) return;
@@ -361,8 +360,7 @@ async function requestLocationPermission(){
     return {available:false,reason:"unsupported"};
   }
   setStatus("📍 Allow Location when your browser asks…");
-  // IMPORTANT: call the GPS function through window so this handler
-  // never depends on a module-scoped getLocation identifier.
+  // IMPORTANT: call the GPS function only through window.
   const loc=window.getPotholeLocation
     ? await window.getPotholeLocation()
     : {available:false,reason:"gps_function_unavailable"};
@@ -812,7 +810,7 @@ async function initReporting(){
 // Keep the existing detector as the source of truth; only add the reporting hook.
 window.__originalDetectSource=window.detectSource;
 window.detectSource=integrationDetectSource;
-window.potholeReporting={createOrUpdateReport,getLocation:getCurrentPotholeLocation,uploadToImageBB,REPORT_CONFIG};
+window.potholeReporting={createOrUpdateReport,getCurrentPotholeLocation:getCurrentPotholeLocation,uploadToImageBB,REPORT_CONFIG};
 initReporting();
 </script>
 
