@@ -61,7 +61,6 @@ input[type=file]{display:none}
 </div>
 
 <script>
-const MODEL_URL = "model/best.onnx";
 
 const INPUT_SIZE=640;
 const CONF_THRESHOLD=0.35;
@@ -83,13 +82,11 @@ const placeholder=document.getElementById("placeholder");
 
 function setStatus(t,cls=""){statusEl.textContent=t;statusEl.className="status "+cls}
 
+
 async function loadModel(){
   try{
     ort.env.wasm.wasmPaths="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
-    const response=await fetch(MODEL_URL);
-    if(!response.ok) throw new Error(`Model request failed: ${response.status} ${response.statusText}`);
-    const bytes=new Uint8Array(await response.arrayBuffer());
-    session=await ort.InferenceSession.create(bytes,{executionProviders:["wasm"]});
+    session=await ort.InferenceSession.create("model/best.onnx",{executionProviders:["wasm"]});
     modelInputName=session.inputNames[0];
     setStatus("AI model ready • start camera or choose an image","ok");
   }catch(e){
