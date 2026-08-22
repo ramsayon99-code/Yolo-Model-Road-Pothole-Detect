@@ -10,7 +10,7 @@
 .app{max-width:760px;margin:auto;padding:18px}.hero{padding:10px 2px 18px}.tag{display:inline-block;padding:6px 10px;border:1px solid #29445e;border-radius:999px;font-size:12px;color:#9ec9ee}
 h1{margin:12px 0 6px;font-size:30px}.sub{margin:0;color:#9eb1c5}.card{background:#0d1b2a;border:1px solid #1c334a;border-radius:20px;padding:16px;margin:12px 0;box-shadow:0 12px 35px #0005}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.btn{border:0;border-radius:14px;padding:14px;font-size:15px;font-weight:700;background:#17314a;color:white;cursor:pointer}.primary{background:#1677ff}.btn:disabled{opacity:.5}
-.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;min-height:250px;display:flex;align-items:center;justify-content:center}.stage img,.stage video{display:block;max-width:100%;max-height:62vh;width:100%;height:auto;object-fit:contain}.stage canvas{position:absolute;pointer-events:none;display:block;max-width:none;max-height:none;margin:0}
+.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;min-height:250px;display:flex;align-items:center;justify-content:center}.stage img,.stage video{display:block;max-width:100%;max-height:62vh;width:auto;height:auto;object-fit:contain;flex:0 0 auto}.stage canvas{position:absolute;pointer-events:none;display:block;max-width:none!important;max-height:none!important;margin:0}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.stat{background:#0a1522;border-radius:14px;padding:12px}.stat b{display:block;font-size:21px}.stat span{font-size:11px;color:#8fa5ba}
 .status{padding:11px 12px;border-radius:12px;background:#0a1522;color:#a9bed2;font-size:13px}.ok{color:#7ee2a8}.warn{color:#ffd36b}
 small{color:#7890a6;line-height:1.5}.hidden{display:none}
@@ -35,7 +35,7 @@ input[type=file]{display:none}
     <div style="height:10px"></div>
     <button class="btn hidden" id="stopCameraBtn" style="width:100%">⏹ Stop Live Camera</button>
     <div style="height:10px"></div>
-    <small id="locationHint">Location is required for road reports. The browser will ask for location permission after the AI model is ready.</small>
+    <small id="locationHint">Tap Enable / Retry Location and choose Allow. For live camera, also choose Allow for Camera. GPS works only on HTTPS/localhost.</small>
     <div style="height:10px"></div>
     <small id="cameraHint">Model: <b>model/best.onnx</b> • Live camera requires HTTPS or localhost. If this file is opened directly from your phone's file manager (file://), the browser will block camera access.</small>
   </div>
@@ -156,8 +156,9 @@ async function loadModel(){
 
     modelInputName=session.inputNames[0];
     setStatus("🤖 AI ready • "+inferenceBackend+" • requesting location permission…","ok");
-        // Ask for GPS as soon as the model is ready, before the camera starts.
-        if(window.requestPotholeLocation){ window.requestPotholeLocation(); }
+        // Do not force a permission prompt on page load. The user can tap the
+        // Location button (or Start Live Camera) to trigger the browser prompt.
+        console.log("AI ready; GPS permission can now be requested by the user.");
   }catch(e){
     console.error(e);
     setStatus("❌ Model failed to load. Keep model/best.onnx beside index.html and use HTTPS.","warn");
@@ -303,33 +304,72 @@ async function liveDetectionLoop(now){
   }
 }
 
+// GPS lives in this same (classic) script as the camera code.
+// This prevents module-scope errors such as:
+// "locationWatchId is not defined" / "getLocation is not defined".
+async function getLocation(){
+  if(!window.isSecureContext){
+    return {available:false,reason:"insecure"};
+  }
+  if(!navigator.geolocation){
+    return {available:false,reason:"unsupported"};
+  }
+  return await new Promise(resolve=>{
+    navigator.geolocation.getCurrentPosition(pos=>{
+      locationCache={
+        available:true,
+        latitude:pos.coords.latitude,
+        longitude:pos.coords.longitude,
+        accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,
+        timestamp:Date.now()
+      };
+      locationCacheAt=Date.now();
+      resolve(locationCache);
+    },err=>{
+      let reason=err?.code===1?"denied":err?.code===2?"unavailable":"timeout";
+      resolve({available:false,reason});
+    },{enableHighAccuracy:true,maximumAge:5000,timeout:15000});
+  });
+}
+window.getPotholeLocation=getLocation;
+
+function startLocationWatch(){
+  if(!navigator.geolocation || locationWatchId!==null || !window.isSecureContext) return;
+  locationWatchId=navigator.geolocation.watchPosition(pos=>{
+    locationCache={
+      available:true,
+      latitude:pos.coords.latitude,
+      longitude:pos.coords.longitude,
+      accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,
+      timestamp:Date.now()
+    };
+    locationCacheAt=Date.now();
+    locationBtn.textContent="📍 Location Ready";
+    locationBtn.disabled=false;
+  },err=>{
+    console.warn("GPS watch error",err);
+  },{enableHighAccuracy:true,maximumAge:5000,timeout:15000});
+}
+
 async function requestLocationPermission(){
   if(!window.isSecureContext){
-    setStatus("🔒 Location blocked: open this site on HTTPS or localhost. Do not open index.html with file://.","warn");
+    setStatus("🔒 Location needs HTTPS. Open the website using https:// (not file://).","warn");
     return {available:false,reason:"insecure"};
   }
   if(!navigator.geolocation){
     setStatus("⚠️ This browser does not support GPS location.","warn");
     return {available:false,reason:"unsupported"};
   }
-  try{
-    if(navigator.permissions?.query){
-      const p=await navigator.permissions.query({name:"geolocation"});
-      if(p.state==='denied'){
-        setStatus("📍 Location is blocked for this site. Open browser/site settings → Location → Allow, then tap Retry Location.","warn");
-        return {available:false,reason:"denied"};
-      }
-    }
-  }catch(e){}
-  setStatus("📍 Requesting location permission…");
+  setStatus("📍 Allow Location when your browser asks…");
   const loc=await getLocation();
   if(loc.available){
-    setStatus("📍 Location granted • GPS is ready for reports","ok");
+    startLocationWatch();
+    setStatus(`📍 GPS ready • ${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}`,"ok");
     locationBtn.textContent="📍 Location Ready";
-    locationBtn.disabled=true;
+  }else if(loc.reason==="denied"){
+    setStatus("🚫 Location denied. Tap the browser 🔒/site settings → Location → Allow, then tap Retry Location.","warn");
   }else{
-    setStatus("📍 Location permission was not granted. Allow Location for this site and tap Retry Location.","warn");
-    locationBtn.disabled=false;
+    setStatus("⚠️ Could not get GPS. Turn on phone Location/GPS and tap Retry Location.","warn");
   }
   return loc;
 }
@@ -350,14 +390,10 @@ async function startCamera(){
   }
   try{
     stopCamera();
-    // Ask for location explicitly before starting the road-scanning camera.
-    // The user can allow or deny it; detection itself continues either way.
-    const loc=await requestLocationPermission();
-    if(!loc.available){
-      setStatus("📍 Camera not started because GPS location is required. Enable Location and tap Retry Location.","warn");
-      return;
-    }
-    setStatus("📷 Requesting rear camera…");
+    // Ask for GPS first. If GPS is unavailable, do NOT crash or block the camera.
+    // Camera can still start; reports will simply wait for a valid GPS fix.
+    await requestLocationPermission();
+    setStatus("📷 Allow Camera when your browser asks…");
     const constraints={audio:false,video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30,max:30}}};
     try{stream=await navigator.mediaDevices.getUserMedia(constraints);}
     catch(firstError){
@@ -381,12 +417,7 @@ async function startCamera(){
     });
     await cameraVideo.play();
 
-    if(navigator.geolocation && locationWatchId===null){
-      locationWatchId=navigator.geolocation.watchPosition(pos=>{
-        locationCache={available:true,latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,timestamp:Date.now()};
-        locationCacheAt=Date.now();
-      },()=>{}, {enableHighAccuracy:true,maximumAge:5000,timeout:10000});
-    }
+    startLocationWatch();
 
     liveMode=true;
     placeholder.classList.add("hidden");
@@ -512,16 +543,7 @@ function haversineMeters(aLat,aLng,bLat,bLng){
   return 2*R*Math.asin(Math.min(1,Math.sqrt(x)));
 }
 function validLatLng(lat,lng){ return Number.isFinite(lat)&&Number.isFinite(lng)&&lat>=-90&&lat<=90&&lng>=-180&&lng<=180; }
-async function getLocation(){
-  if(locationCache && Date.now()-locationCacheAt<30000) return locationCache;
-  if(!navigator.geolocation) return {available:false};
-  return await new Promise(resolve=>{
-    navigator.geolocation.getCurrentPosition(pos=>{
-      locationCache={available:true,latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,timestamp:Date.now()};
-      locationCacheAt=Date.now(); resolve(locationCache);
-    },()=>resolve({available:false}),{enableHighAccuracy:true,maximumAge:10000,timeout:8000});
-  });
-}
+const getLocation=()=>window.getPotholeLocation ? window.getPotholeLocation() : Promise.resolve({available:false,reason:"gps_unavailable"});
 async function imageToBlob(source){
   if(source && source.tagName==='IMG'){
     const r=await fetch(source.src); return await r.blob();
