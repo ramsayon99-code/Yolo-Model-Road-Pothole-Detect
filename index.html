@@ -69,6 +69,8 @@ const IOU_THRESHOLD=0.45;
 
 let session=null, modelInputName=null;
 let stream=null, liveMode=false, detecting=false, lastDetection=0;
+let latestLocation=null, locationWatchId=null;
+let liveReportState=null;
 let currentImageSource=null;
 
 const fileInput=document.getElementById("file");
@@ -89,7 +91,7 @@ async function loadModel(){
     const response=await fetch(MODEL_URL);
     if(!response.ok) throw new Error(`Model request failed: ${response.status} ${response.statusText}`);
     const bytes=new Uint8Array(await response.arrayBuffer());
-    session=await ort.InferenceSession.create(bytes,{executionProviders:["wasm"]});
+    session=await ort.InferenceSession.create(bytes,{executionProviders:navigator.gpu?["webgpu","wasm"]:["wasm"]});
     modelInputName=session.inputNames[0];
     setStatus("AI model ready • start camera or choose an image","ok");
   }catch(e){
@@ -207,8 +209,8 @@ async function liveDetectionLoop(now){
   if(!liveMode) return;
   requestAnimationFrame(liveDetectionLoop);
 
-  // Run inference roughly 8 times/second instead of on every camera frame.
-  if(detecting || now-lastDetection<120 || cameraVideo.readyState<2 || !session) return;
+  // Run inference as soon as the previous inference finishes. This removes the old 120ms artificial delay.
+  if(detecting || cameraVideo.readyState<2 || !session) return;
   lastDetection=now;
   detecting=true;
   try{
@@ -219,6 +221,18 @@ async function liveDetectionLoop(now){
   }finally{
     detecting=false;
   }
+}
+
+function startLocationWatch(){
+  if(!navigator.geolocation || locationWatchId!==null) return;
+  locationWatchId=navigator.geolocation.watchPosition(pos=>{
+    latestLocation={available:true,latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,timestamp:Date.now()};
+    locationCache=latestLocation;
+    locationCacheAt=Date.now();
+  },err=>console.warn('GPS watch error:',err),{enableHighAccuracy:true,maximumAge:0,timeout:5000});
+}
+function stopLocationWatch(){
+  if(locationWatchId!==null && navigator.geolocation){navigator.geolocation.clearWatch(locationWatchId);locationWatchId=null;}
 }
 
 async function startCamera(){
@@ -242,6 +256,7 @@ async function startCamera(){
 
   try{
     stopCamera();
+    startLocationWatch();
     setStatus("📷 Requesting camera permission…");
 
     // Prefer the rear camera on phones. The fallback constraints below
@@ -331,6 +346,8 @@ async function startCamera(){
 function stopCamera(){
   liveMode=false;
   detecting=false;
+  liveReportState=null;
+  stopLocationWatch();
   if(stream){
     stream.getTracks().forEach(t=>t.stop());
     stream=null;
@@ -436,13 +453,14 @@ function haversineMeters(aLat,aLng,bLat,bLng){
 }
 function validLatLng(lat,lng){ return Number.isFinite(lat)&&Number.isFinite(lng)&&lat>=-90&&lat<=90&&lng>=-180&&lng<=180; }
 async function getLocation(){
-  if(locationCache && Date.now()-locationCacheAt<30000) return locationCache;
+  if(latestLocation && Date.now()-latestLocation.timestamp<1500) return latestLocation;
+  if(locationCache && Date.now()-locationCacheAt<1500) return locationCache;
   if(!navigator.geolocation) return {available:false};
   return await new Promise(resolve=>{
     navigator.geolocation.getCurrentPosition(pos=>{
       locationCache={available:true,latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,timestamp:Date.now()};
       locationCacheAt=Date.now(); resolve(locationCache);
-    },()=>resolve({available:false}),{enableHighAccuracy:true,maximumAge:10000,timeout:8000});
+    },()=>resolve({available:false}),{enableHighAccuracy:true,maximumAge:0,timeout:3000});
   });
 }
 async function imageToBlob(source){
@@ -515,16 +533,34 @@ async function createOrUpdateReport(boxes,source,imageBlob){
   const best=confidenceStats(boxes).best;
   if(!Number.isFinite(best) || best<REPORT_CONFIG.confidenceThreshold)return;
 
-  const sig=(location.available?`${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}`:'no-location')+':'+boxes.length;
-  if(sourceType==='live_camera'){
-    if(sig===lastReportSignature && now-lastReportAt<REPORT_CONFIG.cameraUploadCooldownMs){
-      stableDetectionCount++;
-      return;
-    }
-    stableDetectionCount++;
-    if(stableDetectionCount<REPORT_CONFIG.cameraStableDetectionsRequired)return;
+  // Live camera: create one report immediately, then keep its Firebase location/detection
+  // fields synchronized on every fresh detection. This avoids the old 15s/60s throttles.
+  if(sourceType==='live_camera' && liveReportState){
+    const updates={
+      [`reports/${liveReportState.reportId}/latitude`]:location.available?location.latitude:null,
+      [`reports/${liveReportState.reportId}/longitude`]:location.available?location.longitude:null,
+      [`reports/${liveReportState.reportId}/locationAccuracy`]:location.available?location.accuracy:null,
+      [`reports/${liveReportState.reportId}/lastDetectedAt`]:now,
+      [`reports/${liveReportState.reportId}/updatedAt`]:now,
+      [`reports/${liveReportState.reportId}/detectionConfidence`]:best,
+      [`reports/${liveReportState.reportId}/detections`]:boxes.map(b=>({x1:b.x1,y1:b.y1,x2:b.x2,y2:b.y2,confidence:b.score})),
+      [`potholes/${liveReportState.potholeId}/latitude`]:location.available?location.latitude:null,
+      [`potholes/${liveReportState.potholeId}/longitude`]:location.available?location.longitude:null,
+      [`potholes/${liveReportState.potholeId}/locationAccuracy`]:location.available?location.accuracy:null,
+      [`potholes/${liveReportState.potholeId}/lastDetectedAt`]:now,
+      [`potholes/${liveReportState.potholeId}/updatedAt`]:now,
+      [`potholes/${liveReportState.potholeId}/bestConfidence`]:Math.max(Number(liveReportState.bestConfidence)||0,best),
+      [`potholes/${liveReportState.potholeId}/detectionCount`]:Number(liveReportState.detectionCount||0)+boxes.length
+    };
+    liveReportState.bestConfidence=Math.max(Number(liveReportState.bestConfidence)||0,best);
+    liveReportState.detectionCount=Number(liveReportState.detectionCount||0)+boxes.length;
+    await update(ref(db),updates);
+    lastReportAt=now; lastReportSignature=location.available?`${location.latitude},${location.longitude}`:''; lastObservationAt=now;
+    return liveReportState.reportId;
   }
-  if(now-lastObservationAt<REPORT_CONFIG.sameSessionCooldownMs && sig===lastReportSignature)return;
+
+  const sig=(location.available?`${location.latitude.toFixed(6)},${location.longitude.toFixed(6)}`:'no-location')+':'+boxes.length;
+  if(sourceType!=='live_camera' && now-lastObservationAt<REPORT_CONFIG.sameSessionCooldownMs && sig===lastReportSignature)return;
 
   let nearby=null;
   try{nearby=await findNearbyPothole(location);}catch(e){console.error('Nearby pothole lookup failed',e);}
@@ -557,6 +593,16 @@ async function createOrUpdateReport(boxes,source,imageBlob){
     };
     if(imageResult.url && !p.imageUrl) updates[`potholes/${nearby.id}/imageUrl`]=imageResult.url;
     if(!p.reportId)updates[`potholes/${nearby.id}/reportId`]=nearby.id;
+    if(sourceType==='live_camera'){
+      const liveId=p.reportId||nearby.id;
+      updates[`reports/${liveId}/latitude`]=location.available?location.latitude:null;
+      updates[`reports/${liveId}/longitude`]=location.available?location.longitude:null;
+      updates[`reports/${liveId}/locationAccuracy`]=location.available?location.accuracy:null;
+      updates[`reports/${liveId}/lastDetectedAt`]=now;
+      updates[`reports/${liveId}/updatedAt`]=now;
+      updates[`reports/${liveId}/detectionConfidence`]=Math.max(Number(p.detectionConfidence)||0,best);
+      liveReportState={reportId:liveId,potholeId:nearby.id,bestConfidence:Math.max(Number(p.bestConfidence)||0,best),detectionCount:Number(p.detectionCount||0)+boxes.length};
+    }
     await update(ref(db),updates);
     lastReportAt=now;lastReportSignature=sig;lastObservationAt=now;stableDetectionCount=0;
     setReportStatus(`⚠️ Pothole updated • occurrence ${occurrence}`,'warn');
@@ -589,6 +635,7 @@ async function createOrUpdateReport(boxes,source,imageBlob){
   const h=push(ref(db,`statusHistory/${reportId}`));
   updates[`statusHistory/${reportId}/${h.key}`]={status:'New',timestamp:now,adminUid:null,actor:'system',note:'Report created'};
   await update(ref(db),updates);
+  if(sourceType==='live_camera'){ liveReportState={reportId,potholeId,bestConfidence:stats.best,detectionCount:stats.count}; }
   lastReportAt=now;lastReportSignature=sig;lastObservationAt=now;stableDetectionCount=0;
   setReportStatus('✅ Pothole report saved to Firebase','ok');
   return reportId;
@@ -608,7 +655,12 @@ async function integrationDetectSource(source){
       // stability/duplicate/cooldown checks have passed.
       blob=null;
     }
-    await createOrUpdateReport(boxes,source,blob);
+    if(sourceType==='live_camera'){
+      // Never block the next camera inference on a Firebase/network write.
+      createOrUpdateReport(boxes,source,blob).catch(e=>console.error('Live report sync error:',e));
+    }else{
+      await createOrUpdateReport(boxes,source,blob);
+    }
   }catch(e){
     console.error('Report integration error:',e);
     setReportStatus('⚠️ Detection worked, but the report could not be synchronized.','warn');
