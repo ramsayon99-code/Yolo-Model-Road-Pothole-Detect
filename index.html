@@ -10,7 +10,7 @@
 .app{max-width:760px;margin:auto;padding:18px}.hero{padding:10px 2px 18px}.tag{display:inline-block;padding:6px 10px;border:1px solid #29445e;border-radius:999px;font-size:12px;color:#9ec9ee}
 h1{margin:12px 0 6px;font-size:30px}.sub{margin:0;color:#9eb1c5}.card{background:#0d1b2a;border:1px solid #1c334a;border-radius:20px;padding:16px;margin:12px 0;box-shadow:0 12px 35px #0005}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.btn{border:0;border-radius:14px;padding:14px;font-size:15px;font-weight:700;background:#17314a;color:white;cursor:pointer}.primary{background:#1677ff}.btn:disabled{opacity:.5}
-.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;min-height:250px;display:flex;align-items:center;justify-content:center}.stage img,.stage video{display:block;max-width:100%;max-height:62vh;width:auto;height:auto;object-fit:contain;flex:0 0 auto}.stage canvas{position:absolute;pointer-events:none;display:block;max-width:none!important;max-height:none!important;margin:0}
+.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;min-height:250px;display:flex;align-items:center;justify-content:center}.stage img,.stage video{display:block;width:100%;height:auto;max-width:100%;max-height:62vh;object-fit:contain;flex:0 0 auto}.stage video{aspect-ratio:auto}.stage canvas{inset:0;width:100%;height:100%;}.stage canvas{position:absolute;inset:0;pointer-events:none;display:block;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;margin:0}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.stat{background:#0a1522;border-radius:14px;padding:12px}.stat b{display:block;font-size:21px}.stat span{font-size:11px;color:#8fa5ba}
 .status{padding:11px 12px;border-radius:12px;background:#0a1522;color:#a9bed2;font-size:13px}.ok{color:#7ee2a8}.warn{color:#ffd36b}
 small{color:#7890a6;line-height:1.5}.hidden{display:none}
@@ -361,7 +361,11 @@ async function requestLocationPermission(){
     return {available:false,reason:"unsupported"};
   }
   setStatus("📍 Allow Location when your browser asks…");
-  const loc=await getLocation();
+  // IMPORTANT: call the GPS function through window so this handler
+  // never depends on a module-scoped getLocation identifier.
+  const loc=window.getPotholeLocation
+    ? await window.getPotholeLocation()
+    : {available:false,reason:"gps_function_unavailable"};
   if(loc.available){
     startLocationWatch();
     setStatus(`📍 GPS ready • ${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}`,"ok");
@@ -543,7 +547,7 @@ function haversineMeters(aLat,aLng,bLat,bLng){
   return 2*R*Math.asin(Math.min(1,Math.sqrt(x)));
 }
 function validLatLng(lat,lng){ return Number.isFinite(lat)&&Number.isFinite(lng)&&lat>=-90&&lat<=90&&lng>=-180&&lng<=180; }
-const getLocation=()=>window.getPotholeLocation ? window.getPotholeLocation() : Promise.resolve({available:false,reason:"gps_unavailable"});
+const getCurrentPotholeLocation=()=>window.getPotholeLocation ? window.getPotholeLocation() : Promise.resolve({available:false,reason:"gps_unavailable"});
 async function imageToBlob(source){
   if(source && source.tagName==='IMG'){
     const r=await fetch(source.src); return await r.blob();
@@ -616,7 +620,7 @@ async function createOrUpdateReport(boxes,source,imageBlob){
   if(!Number.isFinite(best) || best<REPORT_CONFIG.confidenceThreshold)return null;
 
   // Location is requested/cached separately so it never blocks the detector loop.
-  const location=await getLocation();
+  const location=await getCurrentPotholeLocation();
   const sig=(location.available
     ? `${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}`
     : 'no-location')+':'+boxes.length;
@@ -808,7 +812,7 @@ async function initReporting(){
 // Keep the existing detector as the source of truth; only add the reporting hook.
 window.__originalDetectSource=window.detectSource;
 window.detectSource=integrationDetectSource;
-window.potholeReporting={createOrUpdateReport,getLocation,uploadToImageBB,REPORT_CONFIG};
+window.potholeReporting={createOrUpdateReport,getLocation:getCurrentPotholeLocation,uploadToImageBB,REPORT_CONFIG};
 initReporting();
 </script>
 
