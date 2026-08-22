@@ -10,7 +10,7 @@
 .app{max-width:760px;margin:auto;padding:18px}.hero{padding:10px 2px 18px}.tag{display:inline-block;padding:6px 10px;border:1px solid #29445e;border-radius:999px;font-size:12px;color:#9ec9ee}
 h1{margin:12px 0 6px;font-size:30px}.sub{margin:0;color:#9eb1c5}.card{background:#0d1b2a;border:1px solid #1c334a;border-radius:20px;padding:16px;margin:12px 0;box-shadow:0 12px 35px #0005}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.btn{border:0;border-radius:14px;padding:14px;font-size:15px;font-weight:700;background:#17314a;color:white;cursor:pointer}.primary{background:#1677ff}.btn:disabled{opacity:.5}
-.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;min-height:250px;display:flex;align-items:center;justify-content:center}.stage img,.stage video{display:block;width:100%;height:auto;max-width:100%;max-height:62vh;object-fit:contain;flex:0 0 auto}.stage video{aspect-ratio:auto}.stage canvas{inset:0;width:100%;height:100%;}.stage canvas{position:absolute;inset:0;pointer-events:none;display:block;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;margin:0}
+.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;width:100%;aspect-ratio:4/3;min-height:220px;display:flex;align-items:center;justify-content:center}.stage img,.stage video{display:block;width:100%;height:100%;max-width:none;max-height:none;object-fit:cover;object-position:center;flex:0 0 auto}.stage img{object-fit:contain;background:#02070d}.stage canvas{position:absolute;inset:0;pointer-events:none;display:block;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;margin:0}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.stat{background:#0a1522;border-radius:14px;padding:12px}.stat b{display:block;font-size:21px}.stat span{font-size:11px;color:#8fa5ba}
 .status{padding:11px 12px;border-radius:12px;background:#0a1522;color:#a9bed2;font-size:13px}.ok{color:#7ee2a8}.warn{color:#ffd36b}
 small{color:#7890a6;line-height:1.5}.hidden{display:none}
@@ -149,6 +149,16 @@ async function loadModel(){
       }
     }
 
+    if(!session && ort.env.webgl){
+      try{
+        session=await ort.InferenceSession.create(modelBuffer,{...common,executionProviders:["webgl"]});
+        inferenceBackend="WebGL";
+      }catch(webglError){
+        console.warn("WebGL unavailable; falling back to WASM.",webglError);
+        session=null;
+      }
+    }
+
     if(!session){
       session=await ort.InferenceSession.create(modelBuffer,{...common,executionProviders:["wasm"]});
       inferenceBackend="WASM";
@@ -229,36 +239,45 @@ function parseOutput(out,scale,padX,padY,origW,origH){
 
 function syncOverlayToSource(source,w,h){
   const stage=document.getElementById("stage");
-  const r=source.getBoundingClientRect();
   const sr=stage.getBoundingClientRect();
-  const left=r.left-sr.left;
-  const top=r.top-sr.top;
-  canvas.style.left=left+"px";
-  canvas.style.top=top+"px";
-  canvas.style.width=r.width+"px";
-  canvas.style.height=r.height+"px";
-  canvas.width=w;
-  canvas.height=h;
+  canvas.style.left="0px";
+  canvas.style.top="0px";
+  canvas.style.width=sr.width+"px";
+  canvas.style.height=sr.height+"px";
+  canvas.width=Math.max(1,Math.round(sr.width));
+  canvas.height=Math.max(1,Math.round(sr.height));
+}
+
+function sourceToStageBox(b,w,h,source){
+  const stage=document.getElementById("stage");
+  const sw=stage.clientWidth, sh=stage.clientHeight;
+  if(!source || source.tagName!=="VIDEO"){
+    const sx=sw/w, sy=sh/h;
+    const s=Math.min(sx,sy), dw=w*s, dh=h*s;
+    const ox=(sw-dw)/2, oy=(sh-dh)/2;
+    return {x1:b.x1*s+ox,y1:b.y1*s+oy,x2:b.x2*s+ox,y2:b.y2*s+oy};
+  }
+  // video uses object-fit: cover, so reproduce the crop used by the browser.
+  const scale=Math.max(sw/w,sh/h), dw=w*scale, dh=h*scale;
+  const ox=(sw-dw)/2, oy=(sh-dh)/2;
+  return {x1:b.x1*scale+ox,y1:b.y1*scale+oy,x2:b.x2*scale+ox,y2:b.y2*scale+oy};
 }
 
 function drawBoxes(boxes,w,h,source=null){
   const media=source || (liveMode ? cameraVideo : img);
-  if(media && media.getBoundingClientRect){
-    syncOverlayToSource(media,w,h);
-  }else{
-    canvas.width=w;canvas.height=h;
-  }
-  ctx.clearRect(0,0,w,h);
-  ctx.lineWidth=Math.max(3,w/300);
-  ctx.font=Math.max(16,w/45)+"px system-ui";
+  syncOverlayToSource(media,w,h);
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.lineWidth=Math.max(3,canvas.width/300);
+  ctx.font=Math.max(16,canvas.width/45)+"px system-ui";
   boxes.forEach(b=>{
+    const q=sourceToStageBox(b,w,h,media);
     ctx.strokeStyle="#00e676";ctx.fillStyle="#00e676";
-    ctx.strokeRect(b.x1,b.y1,b.x2-b.x1,b.y2-b.y1);
+    ctx.strokeRect(q.x1,q.y1,q.x2-q.x1,q.y2-q.y1);
     const label=`Pothole ${(b.score*100).toFixed(0)}%`;
     const tw=ctx.measureText(label).width+14,th=28;
-    ctx.fillRect(b.x1,Math.max(0,b.y1-th),tw,th);
+    ctx.fillRect(q.x1,Math.max(0,q.y1-th),tw,th);
     ctx.fillStyle="#06120b";
-    ctx.fillText(label,b.x1+7,Math.max(19,b.y1-8));
+    ctx.fillText(label,q.x1+7,Math.max(19,q.y1-8));
   });
 }
 
@@ -285,6 +304,10 @@ async function detectSource(source){
   document.getElementById("best").textContent=boxes.length?Math.round(Math.max(...boxes.map(x=>x.score))*100)+"%":"0%";
   document.getElementById("time").textContent=Math.round(performance.now()-t0)+" ms";
   setStatus(boxes.length?`⚠️ ${boxes.length} pothole${boxes.length>1?"s":""} detected`:`✅ Scanning • ${inferenceBackend}`,boxes.length?"warn":"ok");
+  // Reporting is deliberately fire-and-forget so Firebase/GPS/ImageBB never slow detection.
+  if(typeof window.onPotholeDetection === "function"){
+    window.onPotholeDetection(source, boxes).catch(err=>console.warn("Report hook error:",err));
+  }
   return boxes;
 }
 
@@ -307,27 +330,17 @@ async function liveDetectionLoop(now){
 // GPS lives in this same classic script as the camera code.
 // The GPS function has a unique name and is exposed through window.
 async function potholeGetCurrentPosition(){
-  if(!window.isSecureContext){
-    return {available:false,reason:"insecure"};
-  }
-  if(!navigator.geolocation){
-    return {available:false,reason:"unsupported"};
-  }
+  if(locationCache && Date.now()-locationCacheAt<30000) return locationCache;
+  if(!window.isSecureContext) return {available:false,reason:"insecure"};
+  if(!navigator.geolocation) return {available:false,reason:"unsupported"};
   return await new Promise(resolve=>{
     navigator.geolocation.getCurrentPosition(pos=>{
-      locationCache={
-        available:true,
-        latitude:pos.coords.latitude,
-        longitude:pos.coords.longitude,
-        accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,
-        timestamp:Date.now()
-      };
-      locationCacheAt=Date.now();
-      resolve(locationCache);
+      locationCache={available:true,latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,timestamp:Date.now()};
+      locationCacheAt=Date.now(); resolve(locationCache);
     },err=>{
-      let reason=err?.code===1?"denied":err?.code===2?"unavailable":"timeout";
-      resolve({available:false,reason});
-    },{enableHighAccuracy:true,maximumAge:5000,timeout:15000});
+      const reason=err?.code===1?"denied":err?.code===2?"unavailable":"timeout";
+      resolve(locationCache && Date.now()-locationCacheAt<120000 ? locationCache : {available:false,reason});
+    },{enableHighAccuracy:true,maximumAge:5000,timeout:8000});
   });
 }
 window.getPotholeLocation=potholeGetCurrentPosition;
@@ -757,39 +770,26 @@ async function createOrUpdateReport(boxes,source,imageBlob){
   return reportId;
 }
 
-async function integrationDetectSource(source){
-  if(window.__originalDetectSource) await window.__originalDetectSource(source);
-  const boxes=Array.isArray(window.__lastPotholeDetections)?window.__lastPotholeDetections:[];
-  if(!boxes.length || !firebaseReady)return boxes;
+window.onPotholeDetection = async function(source, boxes){
+  if(!boxes.length || !firebaseReady) return boxes;
   const sourceType=source?.tagName==='VIDEO'?'live_camera':'image_upload';
-
-  // IMPORTANT: Never await Firebase/Geo/ImageBB work from the live inference loop.
-  // This keeps camera detection responsive even when network requests are slow.
   if(sourceType==='live_camera'){
     const best=confidenceStats(boxes).best;
-    if(!Number.isFinite(best)||best<REPORT_CONFIG.confidenceThreshold)return boxes;
+    if(!Number.isFinite(best)||best<REPORT_CONFIG.confidenceThreshold){ stableDetectionCount=0; return boxes; }
     stableDetectionCount++;
     const now=Date.now();
-    if(stableDetectionCount<REPORT_CONFIG.cameraStableDetectionsRequired)return boxes;
-    if(now-lastReportAt<REPORT_CONFIG.cameraUploadCooldownMs)return boxes;
+    if(stableDetectionCount<REPORT_CONFIG.cameraStableDetectionsRequired) return boxes;
+    if(now-lastReportAt<REPORT_CONFIG.cameraUploadCooldownMs) return boxes;
     stableDetectionCount=0;
-    createOrUpdateReport(boxes,source,null).catch(e=>{
-      console.error('Async report integration error:',e);
-      setReportStatus('⚠️ Detection is working; report sync is delayed.','warn');
-    });
+    createOrUpdateReport(boxes,source,null).catch(e=>console.error('Async camera report error:',e));
     return boxes;
   }
-
-  // Image uploads can wait for the report because there is no live camera loop.
   try{
     const blob=await imageToBlob(source);
     await createOrUpdateReport(boxes,source,blob);
-  }catch(e){
-    console.error('Report integration error:',e);
-    setReportStatus('⚠️ Detection worked, but the report could not be synchronized.','warn');
-  }
+  }catch(e){ console.error('Image report integration error:',e); }
   return boxes;
-}
+};
 
 async function initReporting(){
   if(!isFirebaseConfigured()){
@@ -807,9 +807,6 @@ async function initReporting(){
   }
 }
 
-// Keep the existing detector as the source of truth; only add the reporting hook.
-window.__originalDetectSource=window.detectSource;
-window.detectSource=integrationDetectSource;
 window.potholeReporting={createOrUpdateReport,getCurrentPotholeLocation:getCurrentPotholeLocation,uploadToImageBB,REPORT_CONFIG};
 initReporting();
 </script>
