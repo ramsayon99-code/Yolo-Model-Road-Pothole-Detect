@@ -10,7 +10,7 @@
 .app{max-width:760px;margin:auto;padding:18px}.hero{padding:10px 2px 18px}.tag{display:inline-block;padding:6px 10px;border:1px solid #29445e;border-radius:999px;font-size:12px;color:#9ec9ee}
 h1{margin:12px 0 6px;font-size:30px}.sub{margin:0;color:#9eb1c5}.card{background:#0d1b2a;border:1px solid #1c334a;border-radius:20px;padding:16px;margin:12px 0;box-shadow:0 12px 35px #0005}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.btn{border:0;border-radius:14px;padding:14px;font-size:15px;font-weight:700;background:#17314a;color:white;cursor:pointer}.primary{background:#1677ff}.btn:disabled{opacity:.5}
-.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;min-height:250px;display:flex;align-items:center;justify-content:center}.stage img,.stage video{display:block;max-width:100%;max-height:62vh;width:100%;height:auto;object-fit:contain}.stage canvas{position:absolute;max-width:100%;max-height:62vh;inset:0;margin:auto}
+.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;min-height:250px;display:flex;align-items:center;justify-content:center}.stage img,.stage video{display:block;max-width:100%;max-height:62vh;width:100%;height:auto;object-fit:contain}.stage canvas{position:absolute;pointer-events:none;display:block;max-width:none;max-height:none;margin:0}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.stat{background:#0a1522;border-radius:14px;padding:12px}.stat b{display:block;font-size:21px}.stat span{font-size:11px;color:#8fa5ba}
 .status{padding:11px 12px;border-radius:12px;background:#0a1522;color:#a9bed2;font-size:13px}.ok{color:#7ee2a8}.warn{color:#ffd36b}
 small{color:#7890a6;line-height:1.5}.hidden{display:none}
@@ -30,9 +30,12 @@ input[type=file]{display:none}
     <div class="controls">
       <label class="btn primary">🖼️ Choose Image<input id="file" type="file" accept="image/*"></label>
       <button class="btn" id="cameraBtn">📹 Start Live Camera</button>
+      <button class="btn" id="locationBtn" type="button">📍 Enable / Retry Location</button>
     </div>
     <div style="height:10px"></div>
     <button class="btn hidden" id="stopCameraBtn" style="width:100%">⏹ Stop Live Camera</button>
+    <div style="height:10px"></div>
+    <small id="locationHint">Location is required for road reports. The browser will ask for location permission after the AI model is ready.</small>
     <div style="height:10px"></div>
     <small id="cameraHint">Model: <b>model/best.onnx</b> • Live camera requires HTTPS or localhost. If this file is opened directly from your phone's file manager (file://), the browser will block camera access.</small>
   </div>
@@ -89,6 +92,7 @@ let lastBoxes = [];
 const fileInput=document.getElementById("file");
 const cameraBtn=document.getElementById("cameraBtn");
 const stopCameraBtn=document.getElementById("stopCameraBtn");
+const locationBtn=document.getElementById("locationBtn");
 const cameraVideo=document.getElementById("video");
 const img=document.getElementById("preview");
 const canvas=document.getElementById("overlay");
@@ -142,7 +146,9 @@ async function loadModel(){
     }
 
     modelInputName=session.inputNames[0];
-    setStatus("🤖 AI ready • "+inferenceBackend+" • start camera or choose an image","ok");
+    setStatus("🤖 AI ready • "+inferenceBackend+" • requesting location permission…","ok");
+        // Ask for GPS as soon as the model is ready, before the camera starts.
+        if(window.requestPotholeLocation){ window.requestPotholeLocation(); }
   }catch(e){
     console.error(e);
     setStatus("❌ Model failed to load. Keep model/best.onnx beside index.html and use HTTPS.","warn");
@@ -211,10 +217,27 @@ function parseOutput(out,scale,padX,padY,origW,origH){
   return nms(boxes);
 }
 
-function drawBoxes(boxes,w,h){
-  // Keep the overlay at the actual video/image size only when necessary.
-  // CSS scales it with the video, avoiding expensive DOM layout work.
-  if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
+function syncOverlayToSource(source,w,h){
+  const stage=document.getElementById("stage");
+  const r=source.getBoundingClientRect();
+  const sr=stage.getBoundingClientRect();
+  const left=r.left-sr.left;
+  const top=r.top-sr.top;
+  canvas.style.left=left+"px";
+  canvas.style.top=top+"px";
+  canvas.style.width=r.width+"px";
+  canvas.style.height=r.height+"px";
+  canvas.width=w;
+  canvas.height=h;
+}
+
+function drawBoxes(boxes,w,h,source=null){
+  const media=source || (liveMode ? cameraVideo : img);
+  if(media && media.getBoundingClientRect){
+    syncOverlayToSource(media,w,h);
+  }else{
+    canvas.width=w;canvas.height=h;
+  }
   ctx.clearRect(0,0,w,h);
   ctx.lineWidth=Math.max(3,w/300);
   ctx.font=Math.max(16,w/45)+"px system-ui";
@@ -228,6 +251,7 @@ function drawBoxes(boxes,w,h){
     ctx.fillText(label,b.x1+7,Math.max(19,b.y1-8));
   });
 }
+
 
 async function detectSource(source){
   if(!session||!source) return [];
@@ -246,7 +270,7 @@ async function detectSource(source){
   window.__lastPotholeDetections=boxes.map(b=>({...b}));
   window.__lastPotholeSource=source;
 
-  drawBoxes(boxes,w,h);
+  drawBoxes(boxes,w,h,source);
   document.getElementById("count").textContent=boxes.length;
   document.getElementById("best").textContent=boxes.length?Math.round(Math.max(...boxes.map(x=>x.score))*100)+"%":"0%";
   document.getElementById("time").textContent=Math.round(performance.now()-t0)+" ms";
@@ -271,19 +295,36 @@ async function liveDetectionLoop(now){
 }
 
 async function requestLocationPermission(){
-  if(!navigator.geolocation){
-    setStatus("⚠️ Location is not supported by this browser. Reports can still be sent without coordinates.","warn");
-    return {available:false};
+  if(!window.isSecureContext){
+    setStatus("🔒 Location blocked: open this site on HTTPS or localhost. Do not open index.html with file://.","warn");
+    return {available:false,reason:"insecure"};
   }
+  if(!navigator.geolocation){
+    setStatus("⚠️ This browser does not support GPS location.","warn");
+    return {available:false,reason:"unsupported"};
+  }
+  try{
+    if(navigator.permissions?.query){
+      const p=await navigator.permissions.query({name:"geolocation"});
+      if(p.state==='denied'){
+        setStatus("📍 Location is blocked for this site. Open browser/site settings → Location → Allow, then tap Retry Location.","warn");
+        return {available:false,reason:"denied"};
+      }
+    }
+  }catch(e){}
   setStatus("📍 Requesting location permission…");
   const loc=await getLocation();
   if(loc.available){
-    setStatus("📍 Location permission granted • camera can start","ok");
+    setStatus("📍 Location granted • GPS is ready for reports","ok");
+    locationBtn.textContent="📍 Location Ready";
+    locationBtn.disabled=true;
   }else{
-    setStatus("⚠️ Location permission was denied/unavailable. You can still detect potholes, but coordinates may be missing.","warn");
+    setStatus("📍 Location permission was not granted. Allow Location for this site and tap Retry Location.","warn");
+    locationBtn.disabled=false;
   }
   return loc;
 }
+window.requestPotholeLocation=requestLocationPermission;
 
 async function startCamera(){
   if(!window.isSecureContext){
@@ -302,7 +343,11 @@ async function startCamera(){
     stopCamera();
     // Ask for location explicitly before starting the road-scanning camera.
     // The user can allow or deny it; detection itself continues either way.
-    await requestLocationPermission();
+    const loc=await requestLocationPermission();
+    if(!loc.available){
+      setStatus("📍 Camera not started because GPS location is required. Enable Location and tap Retry Location.","warn");
+      return;
+    }
     setStatus("📷 Requesting rear camera…");
     const constraints={audio:false,video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30,max:30}}};
     try{stream=await navigator.mediaDevices.getUserMedia(constraints);}
@@ -326,6 +371,13 @@ async function startCamera(){
       cameraVideo.addEventListener("error",onError,{once:true});
     });
     await cameraVideo.play();
+
+    if(navigator.geolocation && locationWatchId===null){
+      locationWatchId=navigator.geolocation.watchPosition(pos=>{
+        locationCache={available:true,latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy:Number.isFinite(pos.coords.accuracy)?pos.coords.accuracy:null,timestamp:Date.now()};
+        locationCacheAt=Date.now();
+      },()=>{}, {enableHighAccuracy:true,maximumAge:5000,timeout:10000});
+    }
 
     liveMode=true;
     placeholder.classList.add("hidden");
@@ -357,6 +409,7 @@ function stopCamera(){
   liveMode=false;
   detecting=false;
   if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
+  if(locationWatchId!==null && navigator.geolocation){ navigator.geolocation.clearWatch(locationWatchId); locationWatchId=null; }
   cameraVideo.srcObject=null;
   cameraVideo.classList.add("hidden");
   cameraBtn.disabled=false;
@@ -382,7 +435,9 @@ function loadImage(file){
 
 fileInput.addEventListener("change",e=>loadImage(e.target.files[0]));
 cameraBtn.addEventListener("click",startCamera);
+locationBtn.addEventListener("click",requestLocationPermission);
 stopCameraBtn.addEventListener("click",stopCamera);
+window.addEventListener("resize",()=>{ if(lastBoxes.length){ const media=liveMode?cameraVideo:img; const w=media.videoWidth||media.naturalWidth||media.width; const h=media.videoHeight||media.naturalHeight||media.height; if(w&&h) drawBoxes(lastBoxes,w,h,media); }});
 window.addEventListener("beforeunload",stopCamera);
 loadModel();
 </script>
@@ -424,7 +479,7 @@ const REPORT_CONFIG = {
 let app=null, db=null, auth=null, firebaseReady=false;
 let lastReportAt=0, lastReportSignature="", stableDetectionCount=0;
 let lastObservationAt=0;
-let locationCache=null, locationCacheAt=0;
+let locationCache=null, locationCacheAt=0, locationWatchId=null;
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function isFirebaseConfigured(){
@@ -567,7 +622,7 @@ async function createOrUpdateReport(boxes,source,imageBlob){
 
     const updates={
       [`potholes/${nearby.id}/occurrenceCount`]:occurrence,
-      [`potholes/${nearby.id}/detectionCount`:(Number(p.detectionCount)||0)+boxes.length,
+      [`potholes/${nearby.id}/detectionCount`]: (Number(p.detectionCount)||0)+boxes.length,
       [`potholes/${nearby.id}/bestConfidence`]:Math.max(Number(p.bestConfidence)||0,best),
       [`potholes/${nearby.id}/lastDetectedAt`]:now,
       [`potholes/${nearby.id}/vehicleCount`]:vehicleCount,
