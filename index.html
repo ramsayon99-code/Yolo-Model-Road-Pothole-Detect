@@ -10,10 +10,10 @@
 .app{max-width:760px;margin:auto;padding:18px}.hero{padding:10px 2px 18px}.tag{display:inline-block;padding:6px 10px;border:1px solid #29445e;border-radius:999px;font-size:12px;color:#9ec9ee}
 h1{margin:12px 0 6px;font-size:30px}.sub{margin:0;color:#9eb1c5}.card{background:#0d1b2a;border:1px solid #1c334a;border-radius:20px;padding:16px;margin:12px 0;box-shadow:0 12px 35px #0005}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.btn{border:0;border-radius:14px;padding:14px;font-size:15px;font-weight:700;background:#17314a;color:white;cursor:pointer}.primary{background:#1677ff}.btn:disabled{opacity:.5}
-.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;width:100%;aspect-ratio:4/3;min-height:220px;display:flex;align-items:center;justify-content:center}.stage img,.stage video{display:block;width:100%;height:100%;max-width:none;max-height:none;object-fit:cover;object-position:center;flex:0 0 auto}.stage img{object-fit:contain;background:#02070d}.stage canvas{position:absolute;inset:0;pointer-events:none;display:block;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;margin:0}
+.stage{position:relative;background:#02070d;border-radius:16px;overflow:hidden;width:100%;aspect-ratio:4/3;min-height:220px;display:flex;align-items:center;justify-content:center;isolation:isolate}.stage img,.stage video{display:block;width:100%;height:100%;max-width:100%;max-height:100%;object-fit:cover;object-position:center;flex:0 0 100%;position:absolute;inset:0}.stage img{object-fit:contain;background:#02070d}.stage canvas{position:absolute;inset:0;z-index:5;pointer-events:none;display:block;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;margin:0}
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.stat{background:#0a1522;border-radius:14px;padding:12px}.stat b{display:block;font-size:21px}.stat span{font-size:11px;color:#8fa5ba}
 .status{padding:11px 12px;border-radius:12px;background:#0a1522;color:#a9bed2;font-size:13px}.ok{color:#7ee2a8}.warn{color:#ffd36b}
-small{color:#7890a6;line-height:1.5}.hidden{display:none}
+small{color:#7890a6;line-height:1.5}.hidden{display:none!important}
 input[type=file]{display:none}
 @media(max-width:500px){h1{font-size:26px}.controls{grid-template-columns:1fr}.app{padding:13px}}
 </style>
@@ -59,7 +59,7 @@ input[type=file]{display:none}
 
   <div class="card">
     <b>How it works</b><p><small>📍 When you start the live camera, the browser asks for <b>Location</b> permission and <b>Camera</b> permission. Allow both for GPS coordinates and road scanning.</small></p>
-    <p><small>Images and live camera frames are resized to 640×640 and processed locally by the trained ONNX model in model/best.onnx. WebGPU is used when the phone browser supports it, with WASM fallback. Detection is intentionally throttled to keep the phone responsive; the Firebase report is written immediately after a confirmed detection, while the ImageBB image upload runs separately.</small></p>
+    <p><small>Images and live camera frames are resized to 640×640 and processed locally by the trained ONNX model in model/best.onnx. WebGPU is used when the phone browser supports it, with WASM fallback. Live detection runs continuously as fast as the phone/model can complete each inference; the Firebase report is written immediately after a confirmed detection, while the ImageBB image upload runs separately.</small></p>
   </div>
 </div>
 
@@ -73,7 +73,7 @@ const MODEL_PATH = "model/best.onnx";
 const INPUT_SIZE = 640; // The supplied ONNX model was exported for 640x640.
 const CONF_THRESHOLD = 0.35;
 const IOU_THRESHOLD = 0.45;
-const LIVE_INTERVAL_MS = 75; // target ~13 FPS; actual FPS is limited by the phone.
+const LIVE_INTERVAL_MS = 0; // run again as soon as the previous inference finishes; actual FPS is model/device limited.
 
 let session = null;
 let modelInputName = null;
@@ -307,6 +307,8 @@ async function detectSource(source){
   // Reporting is deliberately fire-and-forget so Firebase/GPS/ImageBB never slow detection.
   if(typeof window.onPotholeDetection === "function"){
     window.onPotholeDetection(source, boxes).catch(err=>console.warn("Report hook error:",err));
+  } else if(boxes.length){
+    window.__pendingPotholeDetection={source,boxes};
   }
   return boxes;
 }
@@ -330,7 +332,7 @@ async function liveDetectionLoop(now){
 // GPS lives in this same classic script as the camera code.
 // The GPS function has a unique name and is exposed through window.
 async function potholeGetCurrentPosition(){
-  if(locationCache && Date.now()-locationCacheAt<30000) return locationCache;
+  if(locationCache && Date.now()-locationCacheAt<120000) return locationCache;
   if(!window.isSecureContext) return {available:false,reason:"insecure"};
   if(!navigator.geolocation) return {available:false,reason:"unsupported"};
   return await new Promise(resolve=>{
@@ -340,7 +342,7 @@ async function potholeGetCurrentPosition(){
     },err=>{
       const reason=err?.code===1?"denied":err?.code===2?"unavailable":"timeout";
       resolve(locationCache && Date.now()-locationCacheAt<120000 ? locationCache : {available:false,reason});
-    },{enableHighAccuracy:true,maximumAge:5000,timeout:8000});
+    },{enableHighAccuracy:true,maximumAge:1000,timeout:4000});
   });
 }
 window.getPotholeLocation=potholeGetCurrentPosition;
@@ -405,9 +407,8 @@ async function startCamera(){
   }
   try{
     stopCamera();
-    // Ask for GPS first. If GPS is unavailable, do NOT crash or block the camera.
-    // Camera can still start; reports will simply wait for a valid GPS fix.
-    await requestLocationPermission();
+    // Ask for GPS without blocking camera startup. Camera must open immediately after the tap.
+    requestLocationPermission().catch(err=>console.warn("GPS permission request failed:",err));
     setStatus("📷 Allow Camera when your browser asks…");
     const constraints={audio:false,video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30,max:30}}};
     try{stream=await navigator.mediaDevices.getUserMedia(constraints);}
@@ -534,6 +535,7 @@ const REPORT_CONFIG = {
 let app=null, db=null, auth=null, firebaseReady=false;
 let lastReportAt=0, lastReportSignature="", stableDetectionCount=0;
 let lastObservationAt=0;
+let reportInFlight=false;
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function isFirebaseConfigured(){
@@ -677,8 +679,20 @@ async function createOrUpdateReport(boxes,source,imageBlob){
       [`observations/${observation.observationId}`]:observation
     };
 
-    // Firebase is updated immediately. ImageBB is uploaded afterwards.
-    await update(ref(db),updates);
+    // Firebase root rules intentionally deny root writes. Write each allowed child path directly.
+    await Promise.all([
+      update(ref(db,`potholes/${nearby.id}`),{
+        occurrenceCount:occurrence,
+        detectionCount:(Number(p.detectionCount)||0)+boxes.length,
+        bestConfidence:Math.max(Number(p.bestConfidence)||0,best),
+        lastDetectedAt:now,
+        vehicleCount:vehicleCount,
+        priority:pr.level,
+        priorityScore:pr.score,
+        updatedAt:now
+      }),
+      set(ref(db,`observations/${observation.observationId}`),observation)
+    ]);
     lastReportAt=now; lastReportSignature=sig; lastObservationAt=now;
     setReportStatus(`⚠️ Pothole updated in Firebase • occurrence ${occurrence}`,'warn');
 
@@ -688,12 +702,10 @@ async function createOrUpdateReport(boxes,source,imageBlob){
       try{
         const result=await uploadToImageBB(blob);
         if(result.url){
-          await update(ref(db),{
-            [`reports/${p.reportId||nearby.id}/imageUrl`]:result.url,
-            [`reports/${p.reportId||nearby.id}/imageUploadStatus`]:result.status,
-            [`potholes/${nearby.id}/imageUrl`]:result.url,
-            [`potholes/${nearby.id}/imageUploadStatus`]:result.status
-          });
+          await Promise.all([
+            update(ref(db,`reports/${p.reportId||nearby.id}`),{imageUrl:result.url,imageUploadStatus:result.status,updatedAt:Date.now()}),
+            update(ref(db,`potholes/${nearby.id}`),{imageUrl:result.url,imageUploadStatus:result.status,updatedAt:Date.now()})
+          ]);
         }
       }catch(e){ console.warn('ImageBB upload failed:',e); }
     }).catch(e=>console.warn('Frame capture failed:',e));
@@ -729,18 +741,17 @@ async function createOrUpdateReport(boxes,source,imageBlob){
   };
 
   const h=push(ref(db,`statusHistory/${reportId}`));
-  // IMPORTANT: this single Firebase update happens BEFORE ImageBB.
-  // Admin can therefore see the report immediately, even if image upload is slow.
-  const updates={
-    [`reports/${reportId}`]:report,
-    [`potholes/${potholeId}`]:{...report},
-    [`observations/${observation.observationId}`]:observation,
-    [`statusHistory/${reportId}/${h.key}`]:{
+  // Firebase root rules deny root writes, so use explicit child writes.
+  // These writes happen before ImageBB so the report appears in Admin immediately.
+  await Promise.all([
+    set(ref(db,`reports/${reportId}`),report),
+    set(ref(db,`potholes/${potholeId}`),{...report}),
+    set(ref(db,`observations/${observation.observationId}`),observation),
+    set(ref(db,`statusHistory/${reportId}/${h.key}`),{
       status:'New',timestamp:now,adminUid:null,actor:'system',
       note:'Report created immediately after AI pothole detection'
-    }
-  };
-  await update(ref(db),updates);
+    })
+  ]);
 
   lastReportAt=now; lastReportSignature=sig; lastObservationAt=now;
   setReportStatus('✅ Pothole detected • report sent to Firebase','ok');
@@ -750,20 +761,16 @@ async function createOrUpdateReport(boxes,source,imageBlob){
     if(!blob)return;
     try{
       const result=await uploadToImageBB(blob);
-      await update(ref(db),{
-        [`reports/${reportId}/imageUrl`]:result.url||null,
-        [`reports/${reportId}/imageUploadStatus`]:result.status,
-        [`reports/${reportId}/updatedAt`]:Date.now(),
-        [`potholes/${potholeId}/imageUrl`]:result.url||null,
-        [`potholes/${potholeId}/imageUploadStatus`]:result.status,
-        [`potholes/${potholeId}/updatedAt`]:Date.now()
-      });
+      await Promise.all([
+        update(ref(db,`reports/${reportId}`),{imageUrl:result.url||null,imageUploadStatus:result.status,updatedAt:Date.now()}),
+        update(ref(db,`potholes/${potholeId}`),{imageUrl:result.url||null,imageUploadStatus:result.status,updatedAt:Date.now()})
+      ]);
     }catch(e){
       console.warn('ImageBB upload failed:',e);
-      await update(ref(db),{
-        [`reports/${reportId}/imageUploadStatus`]:'failed',
-        [`potholes/${potholeId}/imageUploadStatus`]:'failed'
-      }).catch(()=>{});
+      await Promise.all([
+        update(ref(db,`reports/${reportId}`),{imageUploadStatus:'failed'}),
+        update(ref(db,`potholes/${potholeId}`),{imageUploadStatus:'failed'})
+      ]).catch(()=>{});
     }
   }).catch(e=>console.warn('Image capture failed:',e));
 
@@ -780,16 +787,32 @@ window.onPotholeDetection = async function(source, boxes){
     const now=Date.now();
     if(stableDetectionCount<REPORT_CONFIG.cameraStableDetectionsRequired) return boxes;
     if(now-lastReportAt<REPORT_CONFIG.cameraUploadCooldownMs) return boxes;
+    if(reportInFlight) return boxes;
     stableDetectionCount=0;
-    createOrUpdateReport(boxes,source,null).catch(e=>console.error('Async camera report error:',e));
+    reportInFlight=true;
+    createOrUpdateReport(boxes,source,null)
+      .catch(e=>{
+        console.error('Async camera report error:',e);
+        setReportStatus('❌ Firebase report failed • '+(e?.message||e),'warn');
+      })
+      .finally(()=>{reportInFlight=false;});
     return boxes;
   }
   try{
     const blob=await imageToBlob(source);
     await createOrUpdateReport(boxes,source,blob);
-  }catch(e){ console.error('Image report integration error:',e); }
+  }catch(e){
+    console.error('Image report integration error:',e);
+    setReportStatus('❌ Firebase report failed • '+(e?.message||e),'warn');
+  }
   return boxes;
 };
+
+if(window.__pendingPotholeDetection){
+  const pending=window.__pendingPotholeDetection;
+  window.__pendingPotholeDetection=null;
+  window.onPotholeDetection(pending.source,pending.boxes).catch(e=>console.warn('Queued report error:',e));
+}
 
 async function initReporting(){
   if(!isFirebaseConfigured()){
